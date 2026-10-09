@@ -218,7 +218,26 @@ bool Memory::Initialize() {
 
   // Pre-commit the physical memory range so the GPU can access it
   // without page faults. Reference: xenia-canary 5f5be0668.
+  //
+  // mprotect() only affects the specific VMA it's called on - it does not
+  // propagate to other mappings that happen to alias the same underlying
+  // shared-memory pages. heaps_.vA0000000/vC0000000/vE0000000 are separate
+  // MAP_SHARED views (at different host addresses) of this same physical
+  // backing (see map_info: they target the same file offset as heaps_.physical),
+  // so each one needs its own explicit commit or it's left PROT_NONE forever,
+  // causing a SIGSEGV the first time guest code dereferences a pointer into
+  // the physical/GPU-visible aperture via one of the aliased guest addresses
+  // instead of via the flat heaps_.physical range directly.
   rex::memory::AllocFixed(heaps_.physical.TranslateRelative(0), heaps_.physical.heap_size(),
+                          rex::memory::AllocationType::kCommit,
+                          rex::memory::PageAccess::kReadWrite);
+  rex::memory::AllocFixed(heaps_.vA0000000.TranslateRelative(0), heaps_.vA0000000.heap_size(),
+                          rex::memory::AllocationType::kCommit,
+                          rex::memory::PageAccess::kReadWrite);
+  rex::memory::AllocFixed(heaps_.vC0000000.TranslateRelative(0), heaps_.vC0000000.heap_size(),
+                          rex::memory::AllocationType::kCommit,
+                          rex::memory::PageAccess::kReadWrite);
+  rex::memory::AllocFixed(heaps_.vE0000000.TranslateRelative(0), heaps_.vE0000000.heap_size(),
                           rex::memory::AllocationType::kCommit,
                           rex::memory::PageAccess::kReadWrite);
 
@@ -241,10 +260,14 @@ bool Memory::Initialize() {
   // Allocate region at start of XEX range. Title 544307D5 explicitly
   // accesses 0x8000001C and expects a specific constant value.
   // Reference: xenia-canary 78f97f8ff.
-  uint32_t unknown_xex_range;
-  heaps_.v80000000.Alloc(0x40000, 4 * 1024, memory::kMemoryAllocationCommit,
-                         memory::kMemoryProtectRead | memory::kMemoryProtectWrite, false,
-                         &unknown_xex_range);
+  //
+  // Must be AllocFixed at 0x80000000: a free-space Alloc() only lands there
+  // when it happens to be this heap's very first allocation. When something
+  // else claims the base first, the memcpy below hits a never-committed
+  // page and the process takes a SIGBUS.
+  heaps_.v80000000.AllocFixed(0x80000000, 0x40000, 4 * 1024,
+                              memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
+                              memory::kMemoryProtectRead | memory::kMemoryProtectWrite);
 
   uint32_t value_to_write = rex::byte_swap(uint32_t(0x2a6e3f38));
   std::memcpy(TranslateVirtual(0x80000000 + 0x1C), &value_to_write, sizeof(uint32_t));

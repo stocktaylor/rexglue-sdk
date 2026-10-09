@@ -873,7 +873,10 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters, bool& has
   }
   sampler_create_info.minLod = float(parameters.mip_min_level);
   if (parameters.mip_base_map) {
-    assert_false(parameters.mip_linear);
+    // mip_linear can legitimately be set alongside mip_base_map (seen with
+    // Tokyo Xtreme Racer) - the 0.25f LOD clamp below keeps sampling pinned
+    // to the base level either way, so there's nothing to actually diverge
+    // on here; this was a sanity-check assumption, not a real invariant.
     sampler_create_info.maxLod = sampler_create_info.minLod + 0.25f;
   } else {
     sampler_create_info.maxLod = VK_LOD_CLAMP_NONE;

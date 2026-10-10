@@ -141,9 +141,10 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
     *disposition_ptr = 0;
   }
 
+  const bool is_async = static_cast<bool>(overlapped_ptr);
   auto run = [content_manager, xuid, root_name = root_name.value(), flags, content_data,
-              disposition_ptr,
-              license_mask_ptr](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
+              disposition_ptr, license_mask_ptr,
+              is_async](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
     X_RESULT result = X_ERROR_INVALID_PARAMETER;
     kDispositionState disposition = kDispositionState::Unknown;
     switch (flags & 0xF) {
@@ -226,6 +227,12 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
 
     extended_error = X_HRESULT_FROM_WIN32(result);
     length = static_cast<uint32_t>(disposition);
+    // Async XAM calls report any failure as ERROR_FUNCTION_FAILED in the
+    // overlapped status; the specific error lives only in the extended error.
+    // Games (e.g. Ridge Racer 6) treat any other status as corrupt content.
+    if (result != X_ERROR_SUCCESS && is_async) {
+      result = X_ERROR_FUNCTION_FAILED;
+    }
     return result;
   };
 

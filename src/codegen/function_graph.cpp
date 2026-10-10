@@ -534,7 +534,8 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
           REXCODEGEN_WARN("Unable to decode instruction {:X} at {:X}", *data, blockBase);
       } else {
         // Late jump table detection for bctr
-        if (insn.opcode->id == PPC_INST_BCTR && !activeJt) {
+        if (insn.opcode->id == PPC_INST_BCTR && !activeJt &&
+            !ctx.config.knownIndirectCallHints.count(blockBase)) {
           bool is_switch_pattern = false;
           constexpr uint32_t MTCTR_MASK = 0xFC1FFFFF;
           constexpr uint32_t MTCTR_OPCODE = 0x7C0003A6;

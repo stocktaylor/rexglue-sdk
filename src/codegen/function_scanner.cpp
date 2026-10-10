@@ -1815,7 +1815,8 @@ std::optional<JumpTable> detectJumpTable(DecodedBinary& decoded, uint32_t bctrAd
 BlockDiscoveryResult discoverBlocks(
     DecodedBinary& decoded, uint32_t entryPoint, const CodeRegion& containingRegion,
     const std::unordered_set<uint32_t>& knownFunctions, uint32_t pdataSize,
-    const std::unordered_map<uint32_t, JumpTable>* manualSwitchTables) {
+    const std::unordered_map<uint32_t, JumpTable>* manualSwitchTables,
+    const std::unordered_set<uint32_t>* knownIndirectCalls) {
   BlockDiscoveryResult result;
   std::unordered_set<uint32_t> visited;
   std::unordered_set<uint32_t> blockStarts;
@@ -1934,7 +1935,8 @@ BlockDiscoveryResult discoverBlocks(
                   jt->targets.size());
             }
           }
-          if (!jt) {
+          // A bctr listed in indirect_calls is a computed call, never a switch.
+          if (!jt && !(knownIndirectCalls && knownIndirectCalls->count(addr))) {
             jt = detectJumpTable(decoded, addr, containingRegion, entryPoint, funcEnd);
           }
           if (jt) {

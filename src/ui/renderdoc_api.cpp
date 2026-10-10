@@ -10,7 +10,12 @@
  */
 
 #include <rex/logging.h>
+#include <rex/platform.h>
 #include <rex/ui/renderdoc_api.h>
+
+#if !REX_PLATFORM_WIN32
+#include <dlfcn.h>
+#endif
 
 namespace rex {
 namespace ui {
@@ -25,9 +30,17 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
 
   pRENDERDOC_GetAPI get_api = nullptr;
 
-  // Try to load the RenderDoc library. If RenderDoc is attached, the library
-  // should already be loaded into the process and this will increment the
-  // reference count. If not attached, the load will fail and we return nullptr.
+  // Attach only to a RenderDoc that is already in the process (injected by
+  // renderdoccmd/qrenderdoc). A plain dlopen *loads* librenderdoc.so whenever
+  // it is on the library search path - SteamOS ships it in /usr/lib - which
+  // activates RenderDoc and its overlay in every run.
+#if !REX_PLATFORM_WIN32
+  if (void* already_loaded = dlopen(platform::lib_names::kRenderDoc, RTLD_NOW | RTLD_NOLOAD)) {
+    dlclose(already_loaded);
+  } else {
+    return nullptr;
+  }
+#endif
   if (!renderdoc_api->library_.Load(platform::lib_names::kRenderDoc)) {
     return nullptr;
   }

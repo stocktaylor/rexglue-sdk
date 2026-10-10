@@ -411,13 +411,15 @@ class PosixConditionBase {
         return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
       }
 
-      if (timeout == std::chrono::milliseconds::max()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      } else {
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
-        std::this_thread::sleep_for(sleep_time);
+      // Sleep for the real remaining time (capped at 1ms). Truncating it to
+      // whole milliseconds turned every sub-millisecond remainder - i.e. the
+      // whole of each 1ms alertable slice - into sleep_for(0), a busy spin
+      // that burned a full core in e.g. the audio worker.
+      std::chrono::steady_clock::duration sleep_time = std::chrono::milliseconds(1);
+      if (timeout != std::chrono::milliseconds::max()) {
+        sleep_time = std::min<std::chrono::steady_clock::duration>(end_time - now, sleep_time);
       }
+      std::this_thread::sleep_for(sleep_time);
     }
   }
 
@@ -1106,7 +1108,9 @@ std::chrono::milliseconds ComputeAlertableWaitTimeout(
   if (deadline == std::chrono::steady_clock::time_point::max()) {
     return kAlertablePollSlice;
   }
-  auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+  // Round up: truncating a sub-millisecond remainder to 0 made the caller
+  // poll without sleeping until the deadline passed.
+  auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
       deadline - std::chrono::steady_clock::now());
   if (remaining <= std::chrono::milliseconds::zero()) {
     return std::chrono::milliseconds::zero();

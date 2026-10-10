@@ -1449,6 +1449,13 @@ void XHostThread::Execute() {
   // Let the kernel know we are starting.
   kernel_state_->OnThreadExecute(this);
 
+  // Host threads still run guest callbacks (e.g. the audio worker), so seed
+  // the FPSCR like XThread::Execute does. Otherwise csr stays 0 and the first
+  // enableFlushMode() writes an MXCSR with every FP exception unmasked.
+  if (thread_state_) {
+    thread_state_->context()->fpscr.InitHost();
+  }
+
   int ret = host_fn_();
 
   // Exit.

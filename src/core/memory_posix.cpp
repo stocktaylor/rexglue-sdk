@@ -190,7 +190,7 @@ static bool FindEntryForAddress(void* address, LinuxMapEntry& out_entry) {
 }
 
 // Check if [base, base+length) is fully covered by existing mappings (no gaps)
-static bool IsRangeFullyMapped(void* base_address, size_t length) {
+[[maybe_unused]] static bool IsRangeFullyMapped(void* base_address, size_t length) {
   if (!base_address || length == 0)
     return false;
 
@@ -304,11 +304,11 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
   if (errno == EEXIST && base_address &&
       (allocation_type == AllocationType::kCommit ||
        allocation_type == AllocationType::kReserveCommit)) {
-    // Verify the entire range is mapped before using mprotect
-    if (IsRangeFullyMapped(base_address, length)) {
-      if (mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
-        return base_address;
-      }
+    // mprotect fails with ENOMEM if any page in the range is unmapped, so it
+    // performs the "fully mapped" check itself. Parsing /proc/self/maps here
+    // (IsRangeFullyMapped) cost ~0.5 core during level loads.
+    if (mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
+      return base_address;
     }
   }
 #endif

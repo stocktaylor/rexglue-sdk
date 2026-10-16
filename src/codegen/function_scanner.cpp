@@ -188,6 +188,10 @@ bool FunctionScanner::is_restgprlr_function(guest_addr_t address) {
 // 4. SHORTOFFSET: lhzx loads 16-bit offset, added to base
 //    lis rT, table@ha; addi rT, rT, table@l; rlwinm rI, rIdx, 1; lhzx rO, rI, rT;
 //    lis rB, base@ha; addi rB, rB, base@l; add rT, rB, rO; mtctr; bctr
+//
+// ABSOLUTE also appears with the table address built low half first
+// (Burnout Crash's CRASH.DLL, ~100 switches):
+//    li rT, table@l; rlwinm rI, rIdx, 2; addis rT, rT, table@ha; lwzx rX, rI, rT; mtctr; bctr
 //=============================================================================
 
 namespace {
@@ -224,6 +228,7 @@ struct JumpTableMatch {
   bool found_table_addi = false;
   bool found_base_lis = false;
   bool found_base_addi = false;
+  bool table_from_addis = false;  // table built as li rT,lo ; addis rT,rT,hi
 
   // For @ha/@l pairs, addi uses signed immediate, so we need addition with sign extension
   guest_addr_t table_address() const { return table_high + static_cast<i16>(table_low); }
@@ -649,6 +654,31 @@ std::optional<JumpTable> FunctionScanner::detect_jump_table(guest_addr_t bctr_ad
       // Check for register reuse: same register used for both table and base (offset-based types)
       // In this case, backward scan finds BASE first (closer to bctr), then TABLE
       bool register_reuse = match.found_add && (match.table_reg == match.base_reg);
+
+      // li rT,lo ; addis rT,rT,hi gives the same address as lis/addi. The
+      // backward scan meets the addis first; it may be on either lwzx operand.
+      if (!match.found_add && !match.found_table_lis && instr.opcode == Opcode::addis &&
+          instr.D.RA == instr.D.RT &&
+          (instr.D.RT == match.table_reg || instr.D.RT == match.index_reg)) {
+        if (instr.D.RT == match.index_reg) {
+          std::swap(match.table_reg, match.index_reg);
+        }
+        match.table_high = static_cast<guest_addr_t>(instr.D.UIMM()) << 16;
+        match.found_table_lis = true;
+        match.table_from_addis = true;
+        REXCODEGEN_TRACE("  [0x{:08X}] Found addis r{}, r{}, 0x{:04X} (table high, li/addis form)",
+                         addr, static_cast<u32>(instr.D.RT), static_cast<u32>(instr.D.RA),
+                         instr.D.UIMM());
+        continue;
+      }
+      if (match.table_from_addis && !match.found_table_addi && instr.opcode == Opcode::li &&
+          instr.D.RT == match.table_reg) {
+        match.table_low = instr.D.UIMM();
+        match.found_table_addi = true;
+        REXCODEGEN_TRACE("  [0x{:08X}] Found li r{}, 0x{:04X} (table low, li/addis form)", addr,
+                         static_cast<u32>(instr.D.RT), instr.D.UIMM());
+        continue;
+      }
 
       // Check for lis matching table_reg
       if (instr.opcode == Opcode::lis && instr.D.RT == match.table_reg) {
@@ -1396,6 +1426,9 @@ std::optional<JumpTable> detectJumpTable(DecodedBinary& decoded, uint32_t bctrAd
   uint8_t indexReg = 0xFF;       // Current reg being traced (0xFF = stop tracing)
   uint8_t finalIndexReg = 0xFF;  // Last valid indexReg for scanForBounds/output
   int shiftAmount = 0;
+  // lwzx operands, for the li/addis table form where the table may be in rB
+  uint8_t loadRA = 0xFF, loadRB = 0xFF;
+  uint8_t addisTableReg = 0xFF;  // table register once its addis half is seen
 
   // Backward scan from bctr
   uint32_t scanAddr = bctrAddr;
@@ -1431,6 +1464,8 @@ std::optional<JumpTable> detectJumpTable(DecodedBinary& decoded, uint32_t bctrAd
         tableType = JumpTableType::kAbsolute;
         indexReg = insn->X.RB;
         finalIndexReg = indexReg;
+        loadRA = insn->X.RA;
+        loadRB = insn->X.RB;
         foundLoad = true;
         REXCODEGEN_TRACE("detectJumpTable: bctr=0x{:08X} found lwzx at 0x{:08X}", bctrAddr,
                          scanAddr);
@@ -1576,6 +1611,36 @@ std::optional<JumpTable> detectJumpTable(DecodedBinary& decoded, uint32_t bctrAd
     // - AFTER foundLoad (before lbzx in forward order): tableAddr
     // For absolute tables (lwzx), there's only tableAddr (after foundLoad)
     if (foundMtctr) {
+      // li rT, LO ; ... ; addis rT, rT, HI ; lwzx rD, rI, rT -- the table address
+      // built low half first (Burnout Crash's DLL). The backward scan meets the
+      // addis first, and the table can be either lwzx operand: if it is rB,
+      // rA is the (already scaled) index.
+      if (foundLoad && tableType == JumpTableType::kAbsolute && tableAddr == 0 &&
+          addisTableReg == 0xFF && insn->opcode == Opcode::addis && insn->D.RA == insn->D.RT &&
+          (insn->D.RT == loadRA || insn->D.RT == loadRB)) {
+        if (insn->D.RT == loadRB) {
+          indexReg = loadRA;
+          finalIndexReg = loadRA;
+        }
+        addisTableReg = insn->D.RT;
+        pendingTableHi = static_cast<uint32_t>(static_cast<uint16_t>(insn->D.d)) << 16;
+        hasPendingTableHi = true;
+        REXCODEGEN_TRACE(
+            "detectJumpTable: bctr=0x{:08X} found addis r{},r{} at 0x{:08X} hi=0x{:08X} (li/addis "
+            "form), index r{}",
+            bctrAddr, static_cast<uint32_t>(insn->D.RT), static_cast<uint32_t>(insn->D.RA),
+            scanAddr, pendingTableHi, static_cast<uint32_t>(finalIndexReg));
+        continue;
+      }
+      if (addisTableReg != 0xFF && hasPendingTableHi && tableAddr == 0 &&
+          insn->opcode == Opcode::li && insn->D.RT == addisTableReg) {
+        tableAddr = combineHiLo(pendingTableHi, static_cast<uint16_t>(insn->D.d), true);
+        hasPendingTableHi = false;
+        REXCODEGEN_TRACE("detectJumpTable: bctr=0x{:08X} set tableAddr=0x{:08X} from li/addis",
+                         bctrAddr, tableAddr);
+        continue;
+      }
+
       // lis rD, HI
       if (insn->opcode == Opcode::lis) {
         uint32_t hi = static_cast<uint32_t>(static_cast<uint16_t>(insn->D.d)) << 16;
@@ -1584,7 +1649,7 @@ std::optional<JumpTable> detectJumpTable(DecodedBinary& decoded, uint32_t bctrAd
             bctrAddr, scanAddr, hi, foundLoad);
         if (foundLoad) {
           // After load: this is tableAddr (only capture first complete address)
-          if (tableAddr == 0) {
+          if (tableAddr == 0 && addisTableReg == 0xFF) {
             tableAddr =
                 hasPendingTableLo ? combineHiLo(hi, pendingTableLo, pendingTableLoIsAddi) : hi;
             hasPendingTableLo = false;
@@ -1613,7 +1678,11 @@ std::optional<JumpTable> detectJumpTable(DecodedBinary& decoded, uint32_t bctrAd
             bctrAddr, isAddi ? "addi" : "ori", scanAddr, lo, foundLoad);
         if (foundLoad) {
           // After load: this is tableAddr (only capture first complete address)
-          if (tableAddr == 0) {
+          // The li/addis form (handled above) pairs its halves by register;
+          // other addi/ori after the load are unrelated to its table.
+          if (addisTableReg != 0xFF) {
+            // nothing
+          } else if (tableAddr == 0) {
             if (hasPendingTableHi) {
               tableAddr = combineHiLo(pendingTableHi, lo, isAddi);
               hasPendingTableHi = false;

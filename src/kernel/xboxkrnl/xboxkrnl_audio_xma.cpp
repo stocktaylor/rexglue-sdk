@@ -191,7 +191,12 @@ u32 XMAInitializeContext_entry(mapped_void context_ptr, ppc_ptr_t<XMA_CONTEXT_IN
   return 0;
 }
 
-u32 XMASetLoopData_entry(mapped_void context_ptr, ppc_ptr_t<XMA_CONTEXT_DATA> loop_data) {
+// The second argument is an XMA_LOOP_DATA (12 big-endian bytes, as embedded in
+// XMA_CONTEXT_INIT), not a whole context. Reading it as XMA_CONTEXT_DATA took the
+// loop fields from the wrong bytes (loop count 255 read as 0), so streamed sounds
+// that loop through this call - e.g. Ridge Racer 6's music - stopped after one pass.
+// From Sirhalo23/rexglue-sdk (display-vsync branch).
+u32 XMASetLoopData_entry(mapped_void context_ptr, ppc_ptr_t<XMA_LOOP_DATA> loop_data) {
   XMA_CONTEXT_DATA context(context_ptr);
 
   context.loop_start = loop_data->loop_start;

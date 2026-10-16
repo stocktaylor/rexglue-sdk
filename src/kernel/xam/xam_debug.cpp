@@ -30,7 +30,7 @@ void OutputDebugStringA_entry(mapped_string string) {
 void OutputDebugStringW_entry(mapped_wstring string) {
   if (string) {
     // Convert char16_t to UTF-8 for logging (simple ASCII fallback)
-    std::u16string_view sv = string.value();
+    std::u16string sv = string.value();
     std::string utf8;
     utf8.reserve(sv.size());
     for (char16_t c : sv) {

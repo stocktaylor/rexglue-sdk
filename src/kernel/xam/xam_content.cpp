@@ -10,6 +10,7 @@
  */
 
 #include <rex/cvar.h>
+#include <rex/filesystem/devices/host_path_entry.h>
 #include <rex/kernel/xam/private.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -271,8 +272,34 @@ u32 XamContentCreateInternal_entry(mapped_string root_name, mapped_void content_
 u32 XamContentOpenFile_entry(u32 user_index, mapped_string root_name, mapped_string path, u32 flags,
                              mapped_u32 disposition_ptr, mapped_u32 license_mask_ptr,
                              mapped_void overlapped_ptr) {
-  // TODO(gibbed): arguments assumed based on XamContentCreate.
-  return X_ERROR_FILE_NOT_FOUND;
+  // Mounts the STFS package file at `path` (a guest path such as
+  // "game:\Database.xmplr") as `root_name:`. London 2012's Kinect runtime
+  // (NuiInitialize) loads its model packages this way; when it fails, the
+  // input manager never activates and every event start screen ignores input.
+  X_RESULT result = X_ERROR_FILE_NOT_FOUND;
+  auto entry = REX_KERNEL_FS()->ResolvePath(path.value());
+  auto host_entry = dynamic_cast<rex::filesystem::HostPathEntry*>(entry);
+  if (host_entry) {
+    result = REX_KERNEL_STATE()->content_manager()->OpenContentFile(root_name.value(),
+                                                                     host_entry->host_path());
+  }
+  REXKRNL_DEBUG("XamContentOpenFile({}, {}, {}, {:#x}) -> {:#x}", (uint32_t)user_index,
+                root_name.value(), path.value(), (uint32_t)flags, result);
+
+  if (disposition_ptr) {
+    *disposition_ptr = XSUCCEEDED(result) ? static_cast<uint32_t>(kDispositionState::Open) : 0;
+  }
+  if (license_mask_ptr && XSUCCEEDED(result)) {
+    *license_mask_ptr = 0;
+  }
+  if (overlapped_ptr) {
+    // Async failures report ERROR_FUNCTION_FAILED, as in xeXamContentCreate.
+    REX_KERNEL_STATE()->CompleteOverlappedImmediateEx(
+        overlapped_ptr.guest_address(), XSUCCEEDED(result) ? result : X_ERROR_FUNCTION_FAILED,
+        X_HRESULT_FROM_WIN32(result), XSUCCEEDED(result) ? 2 : 0);
+    return X_ERROR_IO_PENDING;
+  }
+  return result;
 }
 
 u32 XamContentFlush_entry(mapped_string root_name, mapped_void overlapped_ptr) {

@@ -33,20 +33,40 @@ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
 #endif
   ImGui::SetNextWindowBgAlpha(0.5f);
   if (ImGui::Begin("Debug##overlay", nullptr, ImGuiWindowFlags_NoCollapse)) {
+    bool shown_fps = false;
     if (stats_provider_) {
       auto stats = stats_provider_();
       if (stats.frame_count > 0) {
         ImGui::Text("Guest: %.1f FPS (%.2f ms)", stats.fps, stats.frame_time_ms);
+        shown_fps = true;
       }
     }
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
-    ImGui::Separator();
-
-    // Frame time graph
+    // Frame time: guest swap to guest swap (kFrameTimeUs, set on XE_SWAP).
     auto ft_us = rex::perf::GetSnapshotCounter(rex::perf::CounterId::kFrameTimeUs);
     float ft_ms = static_cast<float>(ft_us) / 1000.0f;
     frame_time_history_[frame_history_idx_] = ft_ms;
     frame_history_idx_ = (frame_history_idx_ + 1) % kFrameHistorySize;
+
+    // Without a title-supplied stats provider, report the guest frame rate
+    // from the sampled history (averaged: a single swap interval is jittery).
+    if (!shown_fps) {
+      float sum_ms = 0.0f;
+      int samples = 0;
+      for (float ms : frame_time_history_) {
+        if (ms > 0.0f) {
+          sum_ms += ms;
+          ++samples;
+        }
+      }
+      if (samples) {
+        float avg_ms = sum_ms / samples;
+        ImGui::Text("Guest: %.1f FPS (%.2f ms)", 1000.0f / avg_ms, avg_ms);
+      }
+    }
+    ImGui::Separator();
+
+    // Frame time graph
     ImGui::PlotLines("##ft", frame_time_history_.data(), kFrameHistorySize,
                      static_cast<int>(frame_history_idx_), "Frame (ms)", 0.0f, 50.0f,
                      ImVec2(200, 40));

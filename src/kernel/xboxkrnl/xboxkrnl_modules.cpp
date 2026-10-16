@@ -9,12 +9,16 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <mutex>
+#include <unordered_map>
+
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/logging.h>
 #include <rex/hook.h>
 #include <rex/thread/mutex.h>
 #include <rex/types.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/lzx.h>
 #include <rex/system/user_module.h>
 #include <rex/system/xexception.h>
 #include <rex/system/xthread.h>
@@ -214,6 +218,102 @@ u32 XexLoadImageHeaders_entry(mapped_string path, mapped_void headers) {
   return X_STATUS_NOT_IMPLEMENTED;
 }
 
+// LDI: the CAB-era LZX decompression interface (MDI_ERROR_* results). Titles
+// that ship XMemCompress'd data call it directly; London 2012's Kinect runtime
+// unpacks its model database with it and fails to start without it.
+namespace {
+constexpr u32 kMdiErrorNone = 0;
+constexpr u32 kMdiErrorNotEnoughMemory = 1;
+constexpr u32 kMdiErrorBadParameters = 2;
+constexpr u32 kMdiErrorFailed = 4;
+// LZX worst-case expansion of a block, as in the CAB SDK.
+constexpr u32 kLzxMaxGrowth = 6144;
+
+std::mutex ldi_mutex;
+std::unordered_map<u32, lzx_stream_ctx*> ldi_contexts;
+u32 ldi_next_handle = 1;
+
+lzx_stream_ctx* LdiLookup(u32 handle) {
+  std::lock_guard lock(ldi_mutex);
+  auto it = ldi_contexts.find(handle);
+  return it == ldi_contexts.end() ? nullptr : it->second;
+}
+}  // namespace
+
+u32 LDICreateDecompression_entry(mapped_u32 data_block_max_ptr, mapped_void configuration,
+                                 u32 alloc_fn, u32 free_fn, u32 workspace,
+                                 mapped_u32 src_buffer_min_ptr, mapped_u32 handle_ptr) {
+  // configuration: LZXDECOMPRESS { be<s32> WindowSize; be<s32> fCPUtype; }
+  // The 360 variant takes a caller-supplied workspace (r7) before the CAB
+  // SDK's out-params; the handle is the 7th argument (London 2012 reads it
+  // back from there).
+  if (!data_block_max_ptr || !configuration || !handle_ptr) {
+    return kMdiErrorBadParameters;
+  }
+  uint32_t window_size = configuration.as<rex::be<uint32_t>*>()[0];
+  auto ctx = lzx_stream_create(window_size);
+  if (!ctx) {
+    REXKRNL_WARN("LDICreateDecompression: unsupported window size {:#x}", window_size);
+    return kMdiErrorNotEnoughMemory;
+  }
+  if (src_buffer_min_ptr) {
+    *src_buffer_min_ptr = uint32_t(*data_block_max_ptr) + kLzxMaxGrowth;
+  }
+  u32 handle;
+  {
+    std::lock_guard lock(ldi_mutex);
+    handle = ldi_next_handle++;
+    ldi_contexts[handle] = ctx;
+  }
+  *handle_ptr = handle;
+  REXKRNL_DEBUG("LDICreateDecompression(block max {:#x}, window {:#x}) -> handle {}",
+                uint32_t(*data_block_max_ptr), window_size, handle);
+  return kMdiErrorNone;
+}
+
+u32 LDIDecompress_entry(u32 handle, mapped_void src, u32 src_size, mapped_void dst,
+                        mapped_u32 dst_size_ptr) {
+  // *dst_size_ptr: in = bytes this block decompresses to, out = bytes written.
+  auto ctx = LdiLookup(handle);
+  if (!ctx || !src || !dst || !dst_size_ptr) {
+    REXKRNL_WARN("LDIDecompress: bad parameters (handle {:#x})", (uint32_t)handle);
+    return kMdiErrorBadParameters;
+  }
+  uint32_t dst_size = *dst_size_ptr;
+  if (lzx_stream_decompress(ctx, src.as<uint8_t*>(), src_size, dst.as<uint8_t*>(), dst_size)) {
+    REXKRNL_WARN("LDIDecompress(handle {}, {:#x} -> {:#x} bytes) failed", (uint32_t)handle,
+                 (uint32_t)src_size, dst_size);
+    *dst_size_ptr = 0;
+    return kMdiErrorFailed;
+  }
+  REXKRNL_DEBUG("LDIDecompress(handle {}, {:#x} -> {:#x} bytes)", (uint32_t)handle,
+                (uint32_t)src_size, dst_size);
+  return kMdiErrorNone;
+}
+
+u32 LDIResetDecompression_entry(u32 handle) {
+  auto ctx = LdiLookup(handle);
+  if (!ctx) {
+    return kMdiErrorBadParameters;
+  }
+  return lzx_stream_reset(ctx) ? kMdiErrorNotEnoughMemory : kMdiErrorNone;
+}
+
+u32 LDIDestroyDecompression_entry(u32 handle) {
+  lzx_stream_ctx* ctx = nullptr;
+  {
+    std::lock_guard lock(ldi_mutex);
+    auto it = ldi_contexts.find(handle);
+    if (it == ldi_contexts.end()) {
+      return kMdiErrorBadParameters;
+    }
+    ctx = it->second;
+    ldi_contexts.erase(it);
+  }
+  lzx_stream_destroy(ctx);
+  return kMdiErrorNone;
+}
+
 }  // namespace rex::kernel::xboxkrnl
 
 REX_EXPORT(__imp__XexCheckExecutablePrivilege,
@@ -226,6 +326,10 @@ REX_EXPORT(__imp__XexGetProcedureAddress, rex::kernel::xboxkrnl::XexGetProcedure
 REX_EXPORT(__imp__ExRegisterTitleTerminateNotification,
            rex::kernel::xboxkrnl::ExRegisterTitleTerminateNotification_entry)
 REX_EXPORT(__imp__XexLoadImageHeaders, rex::kernel::xboxkrnl::XexLoadImageHeaders_entry)
+REX_EXPORT(__imp__LDICreateDecompression, rex::kernel::xboxkrnl::LDICreateDecompression_entry)
+REX_EXPORT(__imp__LDIDecompress, rex::kernel::xboxkrnl::LDIDecompress_entry)
+REX_EXPORT(__imp__LDIDestroyDecompression, rex::kernel::xboxkrnl::LDIDestroyDecompression_entry)
+REX_EXPORT(__imp__LDIResetDecompression, rex::kernel::xboxkrnl::LDIResetDecompression_entry)
 
 REX_EXPORT_STUB(__imp__XexLoadExecutable);
 REX_EXPORT_STUB(__imp__XexLoadImageFromMemory);
@@ -258,7 +362,3 @@ REX_EXPORT_STUB(__imp__XexTitleHashOpen);
 REX_EXPORT_STUB(__imp__XexReserveCodeBuffer);
 REX_EXPORT_STUB(__imp__XexCommitCodeBuffer);
 REX_EXPORT_STUB(__imp__XexRegisterUsermodeModule);
-REX_EXPORT_STUB(__imp__LDICreateDecompression);
-REX_EXPORT_STUB(__imp__LDIDecompress);
-REX_EXPORT_STUB(__imp__LDIDestroyDecompression);
-REX_EXPORT_STUB(__imp__LDIResetDecompression);

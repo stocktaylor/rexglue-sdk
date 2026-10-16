@@ -483,6 +483,11 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
   }
+  // Unlink now: the fd and its mappings keep the memory alive, and nothing
+  // reopens it by name. Otherwise a crashed or killed process leaves its
+  // multi-GB backing file in /dev/shm until tmpfs fills and later runs die
+  // with SIGBUS. CloseFileMappingHandle's unlink then just fails with ENOENT.
+  shm_unlink(full_path.c_str());
   return static_cast<FileMappingHandle>(ret);
 #endif
 }

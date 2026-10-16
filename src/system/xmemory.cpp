@@ -40,6 +40,11 @@ REXCVAR_DEFINE_BOOL(protect_on_release, false, "Memory",
                     "Protect released memory to prevent accesses");
 
 REXCVAR_DEFINE_BOOL(scribble_heap, false, "Memory", "Scribble 0xCD into all allocated heap memory");
+REXCVAR_DEFINE_BOOL(precommit_physical_views, true, "Memory",
+                    "Commit the 0xA/0xC/0xE physical-memory views read-write at startup, so "
+                    "guest access through an alias the memory wasn't allocated through doesn't "
+                    "fault. Such writes bypass GPU write-watches; turn off to diagnose stale "
+                    "GPU-side data");
 
 namespace rex::memory {
 
@@ -231,15 +236,17 @@ bool Memory::Initialize() {
   rex::memory::AllocFixed(heaps_.physical.TranslateRelative(0), heaps_.physical.heap_size(),
                           rex::memory::AllocationType::kCommit,
                           rex::memory::PageAccess::kReadWrite);
-  rex::memory::AllocFixed(heaps_.vA0000000.TranslateRelative(0), heaps_.vA0000000.heap_size(),
-                          rex::memory::AllocationType::kCommit,
-                          rex::memory::PageAccess::kReadWrite);
-  rex::memory::AllocFixed(heaps_.vC0000000.TranslateRelative(0), heaps_.vC0000000.heap_size(),
-                          rex::memory::AllocationType::kCommit,
-                          rex::memory::PageAccess::kReadWrite);
-  rex::memory::AllocFixed(heaps_.vE0000000.TranslateRelative(0), heaps_.vE0000000.heap_size(),
-                          rex::memory::AllocationType::kCommit,
-                          rex::memory::PageAccess::kReadWrite);
+  if (REXCVAR_GET(precommit_physical_views)) {
+    rex::memory::AllocFixed(heaps_.vA0000000.TranslateRelative(0), heaps_.vA0000000.heap_size(),
+                            rex::memory::AllocationType::kCommit,
+                            rex::memory::PageAccess::kReadWrite);
+    rex::memory::AllocFixed(heaps_.vC0000000.TranslateRelative(0), heaps_.vC0000000.heap_size(),
+                            rex::memory::AllocationType::kCommit,
+                            rex::memory::PageAccess::kReadWrite);
+    rex::memory::AllocFixed(heaps_.vE0000000.TranslateRelative(0), heaps_.vE0000000.heap_size(),
+                            rex::memory::AllocationType::kCommit,
+                            rex::memory::PageAccess::kReadWrite);
+  }
 
   // Install MMIO handler for physical address translation and MMIO ranges
   mmio_handler_ = runtime::MMIOHandler::Install(
@@ -566,10 +573,26 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
   uint32_t virtual_address = HostToGuestVirtual(host_address);
   BaseHeap* heap = LookupHeap(virtual_address);
   if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) {
-    REXSYS_ERROR(
-        "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
-        is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
-        rex::thread::current_thread_id());
+    // A fault the guest catches and retries (an SEH __try around a loop) repeats
+    // forever; logging each one rotates the start-up log away within a second.
+    // Log the first few of a run of identical faults, then every power of two.
+    thread_local uint32_t last_address = 0;
+    thread_local bool last_is_write = false;
+    thread_local uint64_t repeat_count = 0;
+    if (virtual_address == last_address && is_write == last_is_write) {
+      ++repeat_count;
+    } else {
+      last_address = virtual_address;
+      last_is_write = is_write;
+      repeat_count = 1;
+    }
+    if (repeat_count <= 8 || (repeat_count & (repeat_count - 1)) == 0) {
+      REXSYS_ERROR(
+          "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread "
+          "0x{:X} (x{})",
+          is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+          rex::thread::current_thread_id(), repeat_count);
+    }
     return false;
   }
 
@@ -818,7 +841,15 @@ bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uin
       "(+{:08X} thunk reserve)",
       table_base, table_size, code_base, code_base + code_size, kThunkReserveSize);
 
-  if (!heaps_.v80000000.AllocFixed(
+  // The table follows the image, so it lives in whichever XEX heap holds the
+  // image: 0x80000000 for titles, 0x90000000 for system images (dash.xex).
+  BaseHeap* heap = LookupHeap(table_base);
+  if (!heap || heap != LookupHeap(table_base + table_size - 1)) {
+    REXSYS_ERROR("Function table {:08X}-{:08X} does not fit in one heap", table_base,
+                 table_base + table_size);
+    return false;
+  }
+  if (!heap->AllocFixed(
           table_base, table_size, 0x10000,
           memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
           memory::kMemoryProtectRead | memory::kMemoryProtectWrite)) {
@@ -862,7 +893,9 @@ bool Memory::DestroyFunctionTable(uint32_t code_base) {
   REXSYS_DEBUG("Destroying function table at {:08X}, size {:08X} for code {:08X}-{:08X}",
                table_base, table_size, logged_code_base, logged_code_base + logged_code_size);
 
-  heaps_.v80000000.Release(table_base);
+  if (BaseHeap* heap = LookupHeap(table_base)) {
+    heap->Release(table_base);
+  }
   return true;
 }
 

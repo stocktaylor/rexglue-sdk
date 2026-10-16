@@ -298,6 +298,22 @@ void WindowSDL::ApplyNewFullscreen() {
   SDL_SetWindowFullscreen(sdl_window_, IsFullscreen());
 }
 
+void WindowSDL::ApplyNewDesiredLogicalSize() {
+  if (!sdl_window_) {
+    return;
+  }
+  // Same coordinate convention as OpenImpl. SDL keeps the size for when a
+  // fullscreen window returns to windowed.
+#if REX_PLATFORM_MAC
+  int width = int(GetDesiredLogicalWidth());
+  int height = int(GetDesiredLogicalHeight());
+#else
+  int width = int(SizeToPhysical(GetDesiredLogicalWidth()));
+  int height = int(SizeToPhysical(GetDesiredLogicalHeight()));
+#endif
+  SDL_SetWindowSize(sdl_window_, width, height);
+}
+
 void WindowSDL::ApplyNewTitle() {
   if (!sdl_window_) {
     return;

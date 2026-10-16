@@ -259,6 +259,9 @@ class Window {
   // user resizes a non-maximized window.
   uint32_t GetDesiredLogicalWidth() const { return desired_logical_width_; }
   uint32_t GetDesiredLogicalHeight() const { return desired_logical_height_; }
+  // Resizes the window (when not fullscreen; a fullscreen window takes the new
+  // size when it leaves fullscreen).
+  void SetDesiredLogicalSize(uint32_t new_width, uint32_t new_height);
 
   // 0 width or height may be returned even in case of an open window with a
   // valid non-zero-area surface depending on the platform.
@@ -514,6 +517,7 @@ class Window {
   // ApplyNew* means that the value has actually been changed to something
   // different than it was previously.
   virtual void ApplyNewFullscreen() {}
+  virtual void ApplyNewDesiredLogicalSize() {}
   virtual void ApplyNewTitle() {}
   // can_apply_state_in_current_phase whether the window is in a life cycle
   // phase that would normally accept Apply calls (the native window surely

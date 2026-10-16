@@ -404,6 +404,18 @@ X_STATUS XThread::Create() {
   thread_state_ =
       std::make_unique<runtime::ThreadState>(thread_id_, stack_base_, pcr_address_, memory());
 
+  // Start below a terminating frame, as the kernel's thread startup frame
+  // does. With r1 = stack_base the first guest frame's back-chain points at
+  // the guard page above the stack, and guest stack walkers (e.g. exception
+  // backtraces) follow it there and fault. The reserve leaves room for the
+  // linkage/parameter area a callee may write above its caller's r1.
+  {
+    constexpr uint32_t kInitialFrameReserve = 0x80;
+    uint32_t initial_sp = stack_base_ - kInitialFrameReserve;
+    memory()->Fill(initial_sp, kInitialFrameReserve, 0);  // back-chain [r1] = 0
+    thread_state_->context()->r1.u64 = initial_sp;
+  }
+
   REXSYS_NOISY_DEBUG("XThread{:08X} ({:X}) Stack: {:08X}-{:08X}", handle(), thread_id_,
                      stack_limit_, stack_base_);
 

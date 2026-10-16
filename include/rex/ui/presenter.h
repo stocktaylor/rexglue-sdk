@@ -933,6 +933,14 @@ class Presenter {
   // repaint request anyway.
   std::atomic<bool> ui_thread_paint_requested_{false};
 
+  // present_on_guest_swap: when the guest last refreshed its output (steady
+  // clock nanoseconds, 0 = never). Written by the guest output thread, read by
+  // the UI thread to decide whether UI-only repaints can wait for the next
+  // guest frame instead of presenting on their own.
+  std::atomic<int64_t> last_guest_output_refresh_ns_{0};
+  // Whether UI-only repaints are currently deferred to guest frames.
+  bool AreUIRepaintsTiedToGuestOutput() const;
+
   std::mutex guest_output_paint_config_mutex_;
   // UI thread: writable, guest output thread: read-only.
   GuestOutputPaintConfig guest_output_paint_config_;

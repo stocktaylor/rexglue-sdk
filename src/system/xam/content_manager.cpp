@@ -32,6 +32,36 @@ namespace xam {
 
 static const char* kThumbnailFileName = "__thumbnail.png";
 
+// Content thumbnails live next to the package's .header record (Headers tree),
+// not inside the package folder: that folder is the root of the guest's mounted
+// device, so a file there shows up in the game's own directory listing. Ridge
+// Racer 6 takes the first entry of save:\ as its save file and reported "Game
+// Data is corrupted" whenever __thumbnail.png happened to be listed first.
+// (Found by Sirhalo23's RR6 recompilation, SDK-NOTES section 3.)
+static std::filesystem::path ThumbnailPathForHeader(const std::filesystem::path& header_path) {
+  return header_path.parent_path() / (header_path.stem().string() + ".thumbnail.png");
+}
+
+// Move a thumbnail left inside the package folder by older builds to its new place.
+static void MoveLegacyThumbnail(const std::filesystem::path& package_path,
+                                const std::filesystem::path& thumb_path) {
+  std::error_code ec;
+  auto legacy = package_path / kThumbnailFileName;
+  if (!std::filesystem::exists(legacy, ec)) {
+    return;
+  }
+  if (!std::filesystem::exists(thumb_path, ec)) {
+    std::filesystem::create_directories(thumb_path.parent_path(), ec);
+    std::filesystem::rename(legacy, thumb_path, ec);
+    if (!ec) {
+      return;
+    }
+    ec.clear();
+    std::filesystem::copy_file(legacy, thumb_path, ec);
+  }
+  std::filesystem::remove(legacy, ec);
+}
+
 static const char* kGameUserContentDirName = "profile";
 
 static const char* kGameContentHeaderDirName = "Headers";
@@ -53,7 +83,26 @@ ContentPackage::ContentPackage(KernelState* kernel_state, const std::string_view
   fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
 }
 
+ContentPackage::ContentPackage(KernelState* kernel_state, const std::string_view root_name,
+                               const std::filesystem::path& stfs_file)
+    : kernel_state_(kernel_state), root_name_(root_name), package_path_(stfs_file), license_(0) {
+  device_path_ = fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_);
+  content_data_ = XCONTENT_AGGREGATE_DATA();
+
+  auto device = std::make_unique<rex::filesystem::StfsContainerDevice>(device_path_, stfs_file);
+  mounted_ = device->Initialize();
+  if (!mounted_) {
+    return;
+  }
+  auto fs = kernel_state_->file_system();
+  fs->RegisterDevice(std::move(device));
+  fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
+}
+
 ContentPackage::~ContentPackage() {
+  if (!mounted_) {
+    return;
+  }
   auto fs = kernel_state_->file_system();
   fs->UnregisterSymbolicLink(root_name_ + ":");
   fs->UnregisterDevice(device_path_);
@@ -298,11 +347,45 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name, uint64_t 
   if (!std::filesystem::exists(package_path)) {
     return X_ERROR_FILE_NOT_FOUND;
   }
+  {
+    uint64_t used_xuid =
+        (data.xuid != uint64_t(-1) && data.xuid != 0) ? uint64_t(data.xuid) : xuid;
+    MoveLegacyThumbnail(package_path, ThumbnailPathForHeader(ResolvePackageHeaderPath(
+                                          data.file_name(), used_xuid, data.title_id,
+                                          data.content_type)));
+  }
   auto package = ResolvePackage(root_name, xuid, data);
   assert_not_null(package);
   package->LoadPackageLicenseMask(ResolvePackageHeaderPath(
       data.file_name(), xuid, kernel_state_->title_id(), data.content_type));
   content_license = package->GetPackageLicense();
+
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    if (open_packages_.count(string::string_key_case(root_name))) {
+      return X_ERROR_ALREADY_EXISTS;
+    }
+    open_packages_.insert({string::string_key_case::create(root_name), package.release()});
+  }
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT ContentManager::OpenContentFile(const std::string_view root_name,
+                                         const std::filesystem::path& file) {
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    if (open_packages_.count(string::string_key_case(root_name))) {
+      return X_ERROR_ALREADY_EXISTS;
+    }
+  }
+
+  if (!std::filesystem::is_regular_file(file)) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+  auto package = std::make_unique<ContentPackage>(kernel_state_, root_name, file);
+  if (!package->mounted()) {
+    return X_ERROR_FUNCTION_FAILED;
+  }
 
   {
     auto global_lock = global_critical_region_.Acquire();
@@ -333,7 +416,10 @@ X_RESULT ContentManager::GetContentThumbnail(uint64_t xuid, const XCONTENT_AGGRE
                                              std::vector<uint8_t>* buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(xuid, data);
-  auto thumb_path = package_path / kThumbnailFileName;
+  uint64_t used_xuid = (data.xuid != uint64_t(-1) && data.xuid != 0) ? uint64_t(data.xuid) : xuid;
+  auto thumb_path = ThumbnailPathForHeader(
+      ResolvePackageHeaderPath(data.file_name(), used_xuid, data.title_id, data.content_type));
+  MoveLegacyThumbnail(package_path, thumb_path);
   if (std::filesystem::exists(thumb_path)) {
     auto file = rex::filesystem::OpenFile(thumb_path, "rb");
     fseek(file, 0, SEEK_END);
@@ -354,7 +440,12 @@ X_RESULT ContentManager::SetContentThumbnail(uint64_t xuid, const XCONTENT_AGGRE
   auto package_path = ResolvePackagePath(xuid, data);
   std::filesystem::create_directories(package_path);
   if (std::filesystem::exists(package_path)) {
-    auto thumb_path = package_path / kThumbnailFileName;
+    uint64_t used_xuid =
+        (data.xuid != uint64_t(-1) && data.xuid != 0) ? uint64_t(data.xuid) : xuid;
+    auto thumb_path = ThumbnailPathForHeader(
+        ResolvePackageHeaderPath(data.file_name(), used_xuid, data.title_id, data.content_type));
+    MoveLegacyThumbnail(package_path, thumb_path);
+    std::filesystem::create_directories(thumb_path.parent_path());
     auto file = rex::filesystem::OpenFile(thumb_path, "wb");
     fwrite(buffer.data(), 1, buffer.size(), file);
     fclose(file);
@@ -384,6 +475,7 @@ X_RESULT ContentManager::DeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_D
       ResolvePackageHeaderPath(data.file_name(), used_xuid, data.title_id, data.content_type);
   std::error_code ec2;
   bool header_removed = std::filesystem::remove(header_path, ec2);
+  std::filesystem::remove(ThumbnailPathForHeader(header_path), ec2);
 
   if (dir_removed > 0 || header_removed) {
     return X_ERROR_SUCCESS;
@@ -433,6 +525,7 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
 
   std::error_code ec2;
   bool header_removed = std::filesystem::remove(header_path, ec2);
+  std::filesystem::remove(ThumbnailPathForHeader(header_path), ec2);
 
   if (dir_removed > 0 || header_removed) {
     return X_ERROR_SUCCESS;

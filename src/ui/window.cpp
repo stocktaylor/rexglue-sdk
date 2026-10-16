@@ -287,6 +287,23 @@ void Window::SetFullscreen(bool new_fullscreen) {
   }
 }
 
+void Window::SetDesiredLogicalSize(uint32_t new_width, uint32_t new_height) {
+  if (!new_width || !new_height ||
+      (desired_logical_width_ == new_width && desired_logical_height_ == new_height)) {
+    return;
+  }
+  desired_logical_width_ = new_width;
+  desired_logical_height_ = new_height;
+  if (!CanApplyState()) {
+    return;
+  }
+  WindowDestructionReceiver destruction_receiver(this);
+  ApplyNewDesiredLogicalSize();
+  if (destruction_receiver.IsWindowDestroyedOrStateInapplicable()) {
+    return;
+  }
+}
+
 void Window::SetTitle(const std::string_view new_title) {
   if (title_ == new_title) {
     return;

@@ -16,9 +16,11 @@
 
 #include <fmt/format.h>
 #include <rex/assert.h>
+#include <rex/filesystem.h>
 #include <rex/image_info.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/platform.h>
 #include <rex/ppc/function.h>
 #include <rex/runtime.h>
 #include <rex/stream.h>
@@ -46,6 +48,25 @@
 namespace rex::system {
 
 constexpr uint32_t kDeferredOverlappedDelayMillis = 100;
+
+namespace {
+
+// Codegen registers a recompiled DLL module by its CMake target name
+// (<project>_<module>). LoadLibrary decorates that and searches the exe's
+// folder on its own; dlopen does neither, so on POSIX build the file name the
+// target produces and look next to the executable, where
+// rexglue_configure_module_target puts it.
+std::filesystem::path ModuleLibraryPath(const std::string& lib_name) {
+#if REX_PLATFORM_WIN32
+  return std::filesystem::path(lib_name);
+#elif REX_PLATFORM_MAC
+  return rex::filesystem::GetExecutableFolder() / fmt::format("lib{}.dylib", lib_name);
+#else
+  return rex::filesystem::GetExecutableFolder() / fmt::format("lib{}.so", lib_name);
+#endif
+}
+
+}  // namespace
 
 // This is a global object initialized with the XboxkrnlModule.
 // It references the current kernel state object that all kernel methods should
@@ -759,9 +780,10 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
     }
 
     rex::platform::DynamicLibrary library_local;
-    if (!library_local.Load(std::filesystem::path(recomp->shared_lib_name),
-                            rex::platform::SymbolResolution::kImmediate)) {
-      REXSYS_ERROR("Failed to load shared library for module '{}'", recomp->pe_name);
+    auto lib_path = ModuleLibraryPath(recomp->shared_lib_name);
+    if (!library_local.Load(lib_path, rex::platform::SymbolResolution::kImmediate)) {
+      REXSYS_ERROR("Failed to load shared library {} for module '{}'", lib_path.string(),
+                   recomp->pe_name);
     } else {
       auto register_func = reinterpret_cast<runtime::FunctionDispatcher::RegisterFn>(
           library_local.GetRawSymbol("ReXModule_Register"));

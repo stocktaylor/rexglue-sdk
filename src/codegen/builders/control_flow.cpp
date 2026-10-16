@@ -12,6 +12,8 @@
 #include "builder_context.h"
 #include "helpers.h"
 
+#include <unordered_set>
+
 #include <fmt/format.h>
 
 #include <rex/logging.h>
@@ -125,18 +127,20 @@ bool build_bctr(BuilderContext& ctx) {
   }
 
   if (jt) {
-    ctx.println("\tswitch ({}.u32) {{", ctx.r(jt->indexRegister));
+    // Dispatch on CTR, the target address the guest code just loaded, rather
+    // than on the index register: compilers may scale the index in place or
+    // reuse its register as the load destination (lwzx r3,r3,rT), so at the
+    // bctr it no longer holds the index. CTR is right for every table type.
+    // Null entries are left to the default case, which traps.
+    ctx.println("\tswitch ({}.u32) {{", ctx.ctr());
 
+    std::unordered_set<uint32_t> emitted;
     for (size_t i = 0; i < jt->targets.size(); i++) {
-      ctx.println("\tcase {}:", i);
       auto label = jt->targets[i];
-
-      // TODO(tomc): Figure out if this actually is triggered on real hardware and what would
-      // happen?
-      if (label == 0) {
-        ctx.println("\t\t__builtin_trap(); // ERROR - detected jump to null value");
+      if (label == 0 || !emitted.insert(label).second) {
         continue;
       }
+      ctx.println("\tcase 0x{:X}:", label);
 
       auto kind = ctx.graph().classifyTarget(label, ctx.base, false);
       switch (kind) {

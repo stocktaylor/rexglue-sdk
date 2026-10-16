@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -339,8 +340,18 @@ class MappedPtr<char16_t> {
   operator char16_t*() const { return host_ptr_; }
   explicit operator bool() const { return host_ptr_ != nullptr; }
 
-  std::u16string_view value() const {
-    return host_ptr_ ? std::u16string_view(host_ptr_) : std::u16string_view();
+  // Guest strings are big-endian UTF-16: returns a host-order copy, the way
+  // MappedPtr<char>::value() is usable as-is. (Returning a view of the raw
+  // guest chars handed callers byte-swapped text, e.g. XUI resource locators
+  // naming "䜀愀..." instead of "GamerCard.xur".)
+  std::u16string value() const {
+    std::u16string result;
+    if (host_ptr_) {
+      for (const char16_t* p = host_ptr_; *p; ++p) {
+        result.push_back(static_cast<char16_t>(std::byteswap(static_cast<uint16_t>(*p))));
+      }
+    }
+    return result;
   }
 
   char16_t* operator->() const { return host_ptr_; }

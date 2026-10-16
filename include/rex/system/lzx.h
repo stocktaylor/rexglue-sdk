@@ -24,3 +24,15 @@ int lzx_decompress(const void* lzx_data, size_t lzx_len, void* dest, size_t dest
 
 int lzxdelta_apply_patch(rex::xex2_delta_patch* patch, size_t patch_len, uint32_t window_size,
                          void* dest);
+
+// Streaming LZX decoder for the kernel LDI* API (LDICreateDecompression etc.):
+// one context per stream, fed one compressed block per call, each block
+// decompressing to one frame (32 KB, or less for the final frame). The window
+// and Huffman state persist across calls.
+struct lzx_stream_ctx;
+lzx_stream_ctx* lzx_stream_create(uint32_t window_size);
+// Decompresses one block into exactly dst_len bytes. Returns 0 on success.
+int lzx_stream_decompress(lzx_stream_ctx* ctx, const void* src, size_t src_len, void* dst,
+                          size_t dst_len);
+int lzx_stream_reset(lzx_stream_ctx* ctx);
+void lzx_stream_destroy(lzx_stream_ctx* ctx);

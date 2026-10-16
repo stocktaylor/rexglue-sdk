@@ -12,9 +12,11 @@
 #include <rex/kernel/xam/module.h>
 #include <rex/kernel/xam/private.h>
 #include <rex/logging.h>
+#include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/types.h>
 #include <rex/string.h>
+#include <rex/system/flags.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 #include <rex/system/xenumerator.h>
@@ -107,11 +109,11 @@ u32 keXamBuildResourceLocator(uint64_t module, std::u16string_view container,
   std::u16string path;
   if (!module) {
     path = fmt::format(u"file://media:/{}.xzp#{}", container, resource);
-    REXKRNL_DEBUG("XamBuildResourceLocator({0}) returning locator to local file {0}.xzp",
-                  rex::string::to_utf8(container));
   } else {
     path = fmt::format(u"section://{:X},{}#{}", (uint32_t)module, container, resource);
   }
+  REXKRNL_DEBUG("XamBuildResourceLocator({}) -> '{}' (buffer {} chars)",
+                rex::string::to_utf8(container), rex::string::to_utf8(path), buffer_count);
   rex::string::copy_and_swap_truncating(buffer_ptr.as<char16_t*>(), path, buffer_count);
   return 0;
 }
@@ -183,19 +185,17 @@ u32 XGetGameRegion_entry() {
 }
 
 u32 XGetLanguage_entry() {
-  auto desired_language = XLanguage::kEnglish;
-
-  // Switch the language based on game region.
-  // TODO(benvanik): pull from xex header.
-  uint32_t game_region = XEX_REGION_NTSCU;
-  if (game_region & XEX_REGION_NTSCU) {
-    desired_language = XLanguage::kEnglish;
-  } else if (game_region & XEX_REGION_NTSCJ) {
-    desired_language = XLanguage::kJapanese;
+  // Answer with the console language setting (user_language, the same value
+  // ExGetXConfigSetting reports), as the console does. This used to be fixed
+  // to English by a hard-coded NTSC-U region, so multi-language titles (e.g.
+  // Ridge Racer 6) could never be switched. (Found by Sirhalo23's RR6
+  // recompilation, SDK-NOTES section 10.)
+  uint32_t language = REXCVAR_GET(user_language);
+  if (language == uint32_t(XLanguage::kInvalid) ||
+      language >= uint32_t(XLanguage::kMaxLanguages)) {
+    language = uint32_t(XLanguage::kEnglish);
   }
-  // Add more overrides?
-
-  return uint32_t(desired_language);
+  return language;
 }
 
 u32 XamGetCurrentTitleId_entry() {

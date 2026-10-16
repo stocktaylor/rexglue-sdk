@@ -13,13 +13,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #include <rex/cvar.h>
+#include <rex/platform.h>
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/flags.h>
 #include <rex/kernel/xboxkrnl/video.h>
@@ -30,6 +33,10 @@
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
+
+#if REX_PLATFORM_LINUX
+#include <sys/prctl.h>
+#endif
 
 REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
     .allowed({"none", "fxaa", "fxaa_extreme"})
@@ -157,16 +164,31 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         uint64_t vsync_interval_ticks =
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
-        uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
+        // Sleep to each exact vblank deadline. Polling in 1 ms sleeps made every
+        // vblank up to ~1 ms late, and after an oversleep fired several back to
+        // back to catch up, so the guest saw uneven frame times. If the thread
+        // falls a whole interval behind (a host stall), resync instead of
+        // bursting the missed vblanks.
+#if REX_PLATFORM_LINUX
+        // Default timer slack (50 us) would add that much jitter to every vblank.
+        prctl(PR_SET_TIMERSLACK, 1000UL, 0, 0, 0);
+#endif
+        uint64_t next_vblank = chrono::Clock::QueryGuestTickCount() + vsync_interval_ticks;
         while (vsync_worker_running_) {
-          uint64_t current_time = chrono::Clock::QueryGuestTickCount();
           uint64_t interval_ticks =
               REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
-          while (current_time - last_frame_time >= interval_ticks) {
-            MarkVblank();
-            last_frame_time += interval_ticks;
+          uint64_t current_time = chrono::Clock::QueryGuestTickCount();
+          if (current_time < next_vblank) {
+            double remaining_ns =
+                double(next_vblank - current_time) * 1e9 / double(guest_tick_frequency);
+            std::this_thread::sleep_for(std::chrono::nanoseconds(int64_t(remaining_ns)));
+            continue;  // re-check: wake-ups can be early (or the clock scaled)
           }
-          rex::thread::Sleep(std::chrono::milliseconds(1));
+          MarkVblank();
+          next_vblank += interval_ticks;
+          if (current_time >= next_vblank) {
+            next_vblank = current_time + interval_ticks;
+          }
         }
         return 0;
       }));

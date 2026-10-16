@@ -120,7 +120,12 @@ class ContentPackage {
  public:
   ContentPackage(KernelState* kernel_state, const std::string_view root_name,
                  const XCONTENT_AGGREGATE_DATA& data, const std::filesystem::path& package_path);
+  // Mounts an STFS package file (XamContentOpenFile). Check mounted().
+  ContentPackage(KernelState* kernel_state, const std::string_view root_name,
+                 const std::filesystem::path& stfs_file);
   ~ContentPackage();
+
+  bool mounted() const { return mounted_; }
 
   void LoadPackageLicenseMask(const std::filesystem::path header_path);
 
@@ -137,6 +142,7 @@ class ContentPackage {
   std::filesystem::path package_path_;
   XCONTENT_AGGREGATE_DATA content_data_;
   uint32_t license_ = 0;
+  bool mounted_ = true;
 };
 
 class ContentManager {
@@ -156,6 +162,9 @@ class ContentManager {
                          const XCONTENT_AGGREGATE_DATA& data);
   X_RESULT OpenContent(const std::string_view root_name, uint64_t xuid,
                        const XCONTENT_AGGREGATE_DATA& data, uint32_t& content_license);
+  // Mounts an STFS package file (host path) as root_name: (XamContentOpenFile).
+  // Closed with CloseContent like any other open content.
+  X_RESULT OpenContentFile(const std::string_view root_name, const std::filesystem::path& file);
   X_RESULT CloseContent(const std::string_view root_name);
   X_RESULT GetContentThumbnail(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data,
                                std::vector<uint8_t>* buffer);

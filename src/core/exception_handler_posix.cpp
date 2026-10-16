@@ -417,6 +417,28 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+
+  // No handler claimed it. Returning would re-run the faulting instruction,
+  // which faults again forever: a null dereference becomes a silent 100% CPU
+  // hang instead of a crash. Put the original disposition back so the re-run
+  // takes it (normally SIG_DFL: core dump, which `rex crash` can analyse).
+  const struct sigaction* original = nullptr;
+  switch (signal_number) {
+    case SIGILL:
+      original = &original_sigill_handler_;
+      break;
+    case SIGSEGV:
+      original = &original_sigsegv_handler_;
+      break;
+#if REX_PLATFORM_MAC
+    case SIGBUS:
+      original = &original_sigbus_handler_;
+      break;
+#endif
+  }
+  if (original) {
+    sigaction(signal_number, original, nullptr);
+  }
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <utility>
 
 #include <rex/assert.h>
@@ -28,6 +29,25 @@
 
 REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
                     "Allow presentation from non-UI thread");
+
+REXCVAR_DEFINE_BOOL(present_on_guest_swap, false, "UI/Presenter",
+                    "Present exactly once per guest frame: the guest output thread presents "
+                    "on each swap (even with FIFO vsync), and the UI only repaints on its own "
+                    "when the game stops presenting. Frame-rate tools (MangoHud) then measure "
+                    "the game itself, and on a VRR display frames are shown as they're ready");
+
+namespace {
+// Under present_on_guest_swap, the UI repaints with the guest frames while the
+// game keeps presenting; past this gap (loading, paused, booting) it falls
+// back to repainting on its own so overlays stay responsive.
+constexpr int64_t kGuestOutputActiveWindowNs = 100'000'000;  // 100 ms
+
+int64_t SteadyNowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
 
 REXCVAR_DEFINE_BOOL(present_letterbox, true, "UI/Presenter",
                     "Enable letterboxing for non-native aspect ratios");
@@ -537,7 +557,11 @@ void Presenter::PaintFromUIThread(bool force_paint) {
         (draw_ui && ui_drawers_.empty())) {
       request_repaint_immediately = true;
     }
-    if (request_ui_paint_after_current_ui_thread_paint_ && !ui_drawers_.empty()) {
+    // UI drawers ask for a repaint after every paint (ImGui while any dialog
+    // exists). With present_on_guest_swap, let the next guest frame do it
+    // instead, so there's one present per guest frame.
+    if (request_ui_paint_after_current_ui_thread_paint_ && !ui_drawers_.empty() &&
+        !AreUIRepaintsTiedToGuestOutput()) {
       request_repaint_at_tick = true;
     }
   }
@@ -550,6 +574,7 @@ bool Presenter::RefreshGuestOutput(
     uint32_t frontbuffer_width, uint32_t frontbuffer_height, uint32_t display_aspect_ratio_x,
     uint32_t display_aspect_ratio_y,
     std::function<bool(GuestOutputRefreshContext& context)> refresher) {
+  last_guest_output_refresh_ns_.store(SteadyNowNs(), std::memory_order_relaxed);
   GuestOutputProperties& writable_properties =
       guest_output_properties_[guest_output_mailbox_writable_];
   writable_properties.frontbuffer_width = frontbuffer_width;
@@ -766,6 +791,14 @@ void Presenter::RemoveUIDrawerFromUIThread(UIDrawer* drawer) {
   }
 }
 
+bool Presenter::AreUIRepaintsTiedToGuestOutput() const {
+  if (!REXCVAR_GET(present_on_guest_swap)) {
+    return false;
+  }
+  int64_t last = last_guest_output_refresh_ns_.load(std::memory_order_relaxed);
+  return last != 0 && SteadyNowNs() - last < kGuestOutputActiveWindowNs;
+}
+
 void Presenter::RequestUIPaintFromUIThread() {
   if (is_in_ui_thread_paint_) {
     // The paint request will be done once in the end of PaintFromUIThread
@@ -779,6 +812,10 @@ void Presenter::RequestUIPaintFromUIThread() {
   // than the UI thread, check whether it's not pointless to make the request
   // coarsely via paint_mode_.
   if (!ui_drawers_.empty() && paint_mode_ != PaintMode::kNone) {
+    // While the game is presenting, the next guest frame repaints the UI too.
+    if (AreUIRepaintsTiedToGuestOutput()) {
+      return;
+    }
     // The window must be present, otherwise the conditions wouldn't have been
     // met.
     window_->RequestPaint();
@@ -1313,9 +1350,10 @@ Presenter::PaintMode Presenter::GetDesiredPaintModeFromUIThread(bool is_paintabl
   if (!REXCVAR_GET(host_present_from_non_ui_thread)) {
     return PaintMode::kUIThreadOnRequest;
   }
-  if (surface_paint_connection_has_implicit_vsync_) {
+  if (surface_paint_connection_has_implicit_vsync_ && !REXCVAR_GET(present_on_guest_swap)) {
     // Don't be causing host vertical sync CPU waits in the thread generating
-    // the guest output.
+    // the guest output. With present_on_guest_swap that wait is wanted: it
+    // paces the guest frames to the display.
     return PaintMode::kUIThreadOnRequest;
   }
   if (!ui_drawers_.empty()) {

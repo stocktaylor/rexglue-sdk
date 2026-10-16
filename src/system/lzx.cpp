@@ -147,6 +147,117 @@ int lzx_decompress(const void* lzx_data, size_t lzx_len, void* dest, size_t dest
   return result_code;
 }
 
+struct lzx_stream_ctx {
+  mspack_system* sys = nullptr;
+  mspack_memory_file* src = nullptr;
+  mspack_memory_file* dst = nullptr;
+  lzxd_stream* lzxd = nullptr;
+  uint32_t window_bits = 0;
+};
+
+// Source reads past the end of the current block return zeros: the decoder
+// reads ahead a few bytes at frame ends, and an empty read would latch its
+// end-of-input error for the rest of the stream.
+static int lzx_stream_read(mspack_file* file, void* buffer, int chars) {
+  auto memfile = (mspack_memory_file*)file;
+  const off_t remaining = memfile->buffer_size - memfile->offset;
+  if (remaining <= 0) {
+    std::memset(buffer, 0, chars);
+    return chars;
+  }
+  return mspack_memory_read(file, buffer, chars);
+}
+
+lzx_stream_ctx* lzx_stream_create(uint32_t window_size) {
+  uint32_t window_bits;
+  if (!rex::bit_scan_forward(window_size, &window_bits)) {
+    return nullptr;
+  }
+  auto ctx = new lzx_stream_ctx();
+  ctx->window_bits = window_bits;
+  ctx->sys = mspack_memory_sys_create();
+  if (ctx->sys) {
+    ctx->sys->read = lzx_stream_read;
+    ctx->src = mspack_memory_open(ctx->sys, nullptr, 0);
+    ctx->dst = mspack_memory_open(ctx->sys, nullptr, 0);
+  }
+  if (!ctx->src || !ctx->dst || lzx_stream_reset(ctx) != 0) {
+    lzx_stream_destroy(ctx);
+    return nullptr;
+  }
+  return ctx;
+}
+
+int lzx_stream_reset(lzx_stream_ctx* ctx) {
+  if (ctx->lzxd) {
+    lzxd_free(ctx->lzxd);
+  }
+  ctx->lzxd = lzxd_init(ctx->sys, (mspack_file*)ctx->src, (mspack_file*)ctx->dst,
+                        ctx->window_bits, 0, 0x10000, 0, 0);
+  return ctx->lzxd ? 0 : 1;
+}
+
+int lzx_stream_decompress(lzx_stream_ctx* ctx, const void* src, size_t src_len, void* dst,
+                          size_t dst_len) {
+  auto lzx = ctx->lzxd;
+  if (!lzx) {
+    return 1;
+  }
+  if (!dst_len) {
+    return 0;
+  }
+  ctx->src->buffer = const_cast<void*>(src);
+  ctx->src->buffer_size = (off_t)src_len;
+  ctx->src->offset = 0;
+  ctx->dst->buffer = dst;
+  ctx->dst->buffer_size = (off_t)dst_len;
+  ctx->dst->offset = 0;
+
+  // Each call carries one block: drop whatever the decoder read ahead past the
+  // previous one (frames end 16-bit aligned, so nothing real is lost).
+  lzx->i_ptr = lzx->i_end = lzx->inbuf;
+  lzx->bit_buffer = 0;
+  lzx->bits_left = 0;
+  lzx->input_end = 0;
+  // A block shorter than a frame is the final frame; its size comes from the
+  // stream length.
+  lzx->length = lzx->offset + (off_t)dst_len;
+
+  // lzxd_decompress(n) decodes through frame (offset + n) / 32K, i.e. one
+  // frame too many when n ends exactly on a frame boundary, and that frame's
+  // input isn't here yet. Decode n - 1 bytes, then flush the last one.
+  int result = MSPACK_ERR_OK;
+  if (dst_len > 1) {
+    result = lzxd_decompress(lzx, (off_t)dst_len - 1);
+  }
+  if (result == MSPACK_ERR_OK) {
+    result = lzxd_decompress(lzx, 1);
+  }
+  if (result != MSPACK_ERR_OK || ctx->dst->offset != (off_t)dst_len) {
+    return result ? result : 1;
+  }
+  return 0;
+}
+
+void lzx_stream_destroy(lzx_stream_ctx* ctx) {
+  if (!ctx) {
+    return;
+  }
+  if (ctx->lzxd) {
+    lzxd_free(ctx->lzxd);
+  }
+  if (ctx->src) {
+    mspack_memory_close(ctx->src);
+  }
+  if (ctx->dst) {
+    mspack_memory_close(ctx->dst);
+  }
+  if (ctx->sys) {
+    mspack_memory_sys_destroy(ctx->sys);
+  }
+  delete ctx;
+}
+
 int lzxdelta_apply_patch(rex::xex2_delta_patch* patch, size_t patch_len, uint32_t window_size,
                          void* dest) {
   void* patch_end = (char*)patch + patch_len;

@@ -116,13 +116,14 @@ namespace disruptorplus
             sequence_t result;
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
+                // (lock, duration, predicate); see wait_until_published below.
                 m_cv.wait_for(
                     lock,
+                    timeout,
                     [&]() -> bool {
                         result = minimum_sequence_after(sequence, count, sequences);
                         return difference(result, sequence) >= 0;
-                    },
-                    timeout);
+                    });
             }
             return result;
         }
@@ -169,13 +170,15 @@ namespace disruptorplus
             sequence_t result;
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
+                // (lock, deadline, predicate): upstream passed the predicate
+                // before the deadline, which matches no wait_until overload.
                 m_cv.wait_until(
                     lock,
+                    timeoutTime,
                     [&]() -> bool {
                         result = minimum_sequence_after(sequence, count, sequences);
                         return difference(result, sequence) >= 0;
-                    },
-                    timeoutTime);
+                    });
             }
             return result;
         }

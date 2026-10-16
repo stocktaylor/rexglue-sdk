@@ -685,8 +685,13 @@ void DxbcShaderTranslator::ExportToMemory(uint8_t export_eM) {
       // (assuming a little-endian host).
       a_.OpBFI(dxbc::Dest::R(sub_dword_temp, 0b0001), dxbc::Src::LU(2), dxbc::Src::LU(3),
                eM0_address_src, dxbc::Src::LU(0));
-      // Keep only the dword part of the address.
-      a_.OpAnd(eM0_address_dest, eM0_address_src, dxbc::Src::LU(~uint32_t(3)));
+      // Keep only the dword part of the address (as a dword index for typed
+      // shared memory views).
+      if (shared_memory_typed_views_) {
+        a_.OpUShR(eM0_address_dest, eM0_address_src, dxbc::Src::LU(2));
+      } else {
+        a_.OpAnd(eM0_address_dest, eM0_address_src, dxbc::Src::LU(~uint32_t(3)));
+      }
       // Erase the bits that will be replaced with eM0 via sub_dword_temp.y.
       a_.OpBFI(dxbc::Dest::R(sub_dword_temp, 0b0010), width_src,
                dxbc::Src::R(sub_dword_temp, dxbc::Src::kXXXX), dxbc::Src::LU(0),
@@ -706,9 +711,15 @@ void DxbcShaderTranslator::ExportToMemory(uint8_t export_eM) {
       // (assuming a little-endian host).
       a_.OpBFI(dxbc::Dest::R(sub_dword_temp, export_eM14), dxbc::Src::LU(2), dxbc::Src::LU(3),
                dxbc::Src::R(eM14_address_temp), dxbc::Src::LU(0));
-      // Keep only the dword part of the address.
-      a_.OpAnd(dxbc::Dest::R(eM14_address_temp, export_eM14), dxbc::Src::R(eM14_address_temp),
-               dxbc::Src::LU(~uint32_t(3)));
+      // Keep only the dword part of the address (as a dword index for typed
+      // shared memory views).
+      if (shared_memory_typed_views_) {
+        a_.OpUShR(dxbc::Dest::R(eM14_address_temp, export_eM14), dxbc::Src::R(eM14_address_temp),
+                  dxbc::Src::LU(2));
+      } else {
+        a_.OpAnd(dxbc::Dest::R(eM14_address_temp, export_eM14), dxbc::Src::R(eM14_address_temp),
+                 dxbc::Src::LU(~uint32_t(3)));
+      }
       uint32_t sub_dword_data_temp = PushSystemTemp();
       eM14_remaining = export_eM14;
       while (rex::bit_scan_forward(eM14_remaining, &eM14_index)) {
@@ -745,6 +756,41 @@ void DxbcShaderTranslator::ExportToMemory(uint8_t export_eM) {
     uint32_t store_mask = (uint32_t(1) << (uint32_t(1) << (i - 2))) - 1;
     dxbc::Dest store_dest(
         dxbc::Dest::U(uav_index_shared_memory_, uint32_t(UAVRegister::kSharedMemory), store_mask));
+    if (shared_memory_typed_views_) {
+      // R32_UINT typed view: one store per dword, addressed by dword index.
+      // Typed stores can't be write-masked, so replicate each dword. The
+      // addresses are modified in place - only one case runs.
+      uint32_t dword_count = uint32_t(1) << (i - 2);
+      dxbc::Dest typed_store_dest(
+          dxbc::Dest::U(uav_index_shared_memory_, uint32_t(UAVRegister::kSharedMemory), 0b1111));
+      auto store_typed = [&](const dxbc::Dest& address_dest, const dxbc::Src& address_src,
+                             uint32_t data_temp) {
+        a_.OpUShR(address_dest, address_src, dxbc::Src::LU(2));
+        for (uint32_t j = 0; j < dword_count; ++j) {
+          if (j) {
+            a_.OpIAdd(address_dest, address_src, dxbc::Src::LU(1));
+          }
+          a_.OpStoreUAVTyped(typed_store_dest, address_src, 1,
+                             dxbc::Src::R(data_temp).Select(j));
+        }
+      };
+      if (export_eM & 0b1) {
+        a_.OpIf(true, eM0_written_src);
+        store_typed(eM0_address_dest, eM0_address_src, system_temps_memexport_data_[0]);
+        a_.OpEndIf();
+      }
+      eM14_remaining = export_eM14;
+      while (rex::bit_scan_forward(eM14_remaining, &eM14_index)) {
+        eM14_remaining &= ~(uint8_t(1) << eM14_index);
+        a_.OpIf(true, dxbc::Src::R(store_eM14_temp).Select(eM14_index));
+        store_typed(dxbc::Dest::R(eM14_address_temp, uint32_t(1) << eM14_index),
+                    dxbc::Src::R(eM14_address_temp).Select(eM14_index),
+                    system_temps_memexport_data_[1 + eM14_index]);
+        a_.OpEndIf();
+      }
+      a_.OpBreak();
+      continue;
+    }
     if (export_eM & 0b1) {
       a_.OpIf(true, eM0_written_src);
       a_.OpStoreRaw(store_dest, eM0_address_src, dxbc::Src::R(system_temps_memexport_data_[0]));

@@ -25,7 +25,24 @@ REXCVAR_DEFINE_BOOL(d3d12_tiled_shared_memory, true, "GPU/D3D12",
                     "Use tiled shared memory on D3D12")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_BOOL(d3d12_shared_memory_typed_views, false, "GPU/D3D12",
+                    "Access shared memory in shaders through R32_UINT typed views instead of "
+                    "raw views (always on for Qualcomm, whose drivers break raw views over "
+                    "256 MB)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 namespace rex::graphics::d3d12 {
+
+bool D3D12SharedMemory::ShouldUseTypedViews(const ui::d3d12::D3D12Provider& provider) {
+  if (REXCVAR_GET(d3d12_shared_memory_typed_views)) {
+    return true;
+  }
+  // DXGI reports Qualcomm as 0x5143 on some drivers and as the ACPI-style
+  // "QCOM" (0x4D4F4351) on Windows on Snapdragon.
+  uint32_t vendor_id = uint32_t(provider.GetAdapterVendorID());
+  return vendor_id == uint32_t(ui::GraphicsProvider::GpuVendorID::kQualcomm) ||
+         vendor_id == 0x4D4F4351;
+}
 
 D3D12SharedMemory::D3D12SharedMemory(D3D12CommandProcessor& command_processor,
                                      memory::Memory& memory)
@@ -40,6 +57,11 @@ bool D3D12SharedMemory::Initialize() {
 
   const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
+
+  typed_views_ = ShouldUseTypedViews(provider);
+  if (typed_views_) {
+    REXGPU_INFO("Shared memory: using R32_UINT typed views in shaders instead of raw views");
+  }
 
   D3D12_RESOURCE_DESC buffer_desc;
   ui::d3d12::util::FillBufferResourceDesc(buffer_desc, kBufferSize,
@@ -191,6 +213,10 @@ void D3D12SharedMemory::CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATES
 }
 
 void D3D12SharedMemory::WriteRawSRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+  if (typed_views_) {
+    WriteUintPow2SRVDescriptor(handle, 2);
+    return;
+  }
   const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
   device->CopyDescriptorsSimple(
@@ -201,6 +227,10 @@ void D3D12SharedMemory::WriteRawSRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle
 }
 
 void D3D12SharedMemory::WriteRawUAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+  if (typed_views_) {
+    WriteUintPow2UAVDescriptor(handle, 2);
+    return;
+  }
   const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
   device->CopyDescriptorsSimple(
@@ -208,6 +238,24 @@ void D3D12SharedMemory::WriteRawUAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle
       provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
                                     uint32_t(BufferDescriptorIndex::kRawUAV)),
       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+void D3D12SharedMemory::WriteNullSRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle) const {
+  ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
+  if (typed_views_) {
+    ui::d3d12::util::CreateBufferTypedSRV(device, handle, nullptr, DXGI_FORMAT_R32_UINT, 0);
+  } else {
+    ui::d3d12::util::CreateBufferRawSRV(device, handle, nullptr, 0);
+  }
+}
+
+void D3D12SharedMemory::WriteNullUAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle) const {
+  ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
+  if (typed_views_) {
+    ui::d3d12::util::CreateBufferTypedUAV(device, handle, nullptr, DXGI_FORMAT_R32_UINT, 0);
+  } else {
+    ui::d3d12::util::CreateBufferRawUAV(device, handle, nullptr, 0);
+  }
 }
 
 void D3D12SharedMemory::WriteUintPow2SRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle,

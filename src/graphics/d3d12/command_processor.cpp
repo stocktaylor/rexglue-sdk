@@ -1487,18 +1487,12 @@ bool D3D12CommandProcessor::SetupContext() {
   if (bindless_resources_used_) {
     // Create the system bindless descriptors once all resources are
     // initialized.
-    // kNullRawSRV.
-    ui::d3d12::util::CreateBufferRawSRV(
-        device,
-        provider.OffsetViewDescriptor(view_bindless_heap_cpu_start_,
-                                      uint32_t(SystemBindlessView::kNullRawSRV)),
-        nullptr, 0);
+    // kNullRawSRV (typed if shared memory uses typed views).
+    shared_memory_->WriteNullSRVDescriptor(provider.OffsetViewDescriptor(
+        view_bindless_heap_cpu_start_, uint32_t(SystemBindlessView::kNullRawSRV)));
     // kNullRawUAV.
-    ui::d3d12::util::CreateBufferRawUAV(
-        device,
-        provider.OffsetViewDescriptor(view_bindless_heap_cpu_start_,
-                                      uint32_t(SystemBindlessView::kNullRawUAV)),
-        nullptr, 0);
+    shared_memory_->WriteNullUAVDescriptor(provider.OffsetViewDescriptor(
+        view_bindless_heap_cpu_start_, uint32_t(SystemBindlessView::kNullRawUAV)));
     // kNullTexture2DArray.
     D3D12_SHADER_RESOURCE_VIEW_DESC null_srv_desc;
     null_srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -4534,7 +4528,7 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
       shared_memory_->WriteRawSRVDescriptor(view_cpu_handle);
       view_cpu_handle.ptr += descriptor_size_view;
       view_gpu_handle.ptr += descriptor_size_view;
-      ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle, nullptr, 0);
+      shared_memory_->WriteNullUAVDescriptor(view_cpu_handle);
       view_cpu_handle.ptr += descriptor_size_view;
       view_gpu_handle.ptr += descriptor_size_view;
       if (edram_rov_used) {
@@ -4544,7 +4538,7 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
       }
       // Null SRV + UAV + EDRAM.
       gpu_handle_shared_memory_uav_and_edram_ = view_gpu_handle;
-      ui::d3d12::util::CreateBufferRawSRV(device, view_cpu_handle, nullptr, 0);
+      shared_memory_->WriteNullSRVDescriptor(view_cpu_handle);
       view_cpu_handle.ptr += descriptor_size_view;
       view_gpu_handle.ptr += descriptor_size_view;
       shared_memory_->WriteRawUAVDescriptor(view_cpu_handle);

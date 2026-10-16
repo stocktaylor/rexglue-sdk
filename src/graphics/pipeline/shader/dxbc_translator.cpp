@@ -60,12 +60,14 @@ DxbcShaderTranslator::DxbcShaderTranslator(ui::GraphicsProvider::GpuVendorID ven
                                            bool gamma_render_target_as_unorm8,
                                            bool msaa_2x_supported, uint32_t draw_resolution_scale_x,
                                            uint32_t draw_resolution_scale_y,
-                                           bool force_emit_source_map)
+                                           bool force_emit_source_map,
+                                           bool shared_memory_typed_views)
     : a_(shader_code_, statistics_),
       ao_(shader_object_, statistics_),
       vendor_id_(vendor_id),
       bindless_resources_used_(bindless_resources_used),
       edram_rov_used_(edram_rov_used),
+      shared_memory_typed_views_(shared_memory_typed_views),
       gamma_render_target_as_unorm8_(gamma_render_target_as_unorm8),
       msaa_2x_supported_(msaa_2x_supported),
       draw_resolution_scale_x_(draw_resolution_scale_x),
@@ -2364,8 +2366,14 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
       if (i == srv_index_shared_memory_) {
         // Shared memory (when memexport isn't used in the pipeline).
         srv.name_ptr = shared_memory_srv_name_ptr;
-        srv.type = dxbc::RdefInputType::kByteAddress;
-        srv.return_type = dxbc::ResourceReturnType::kMixed;
+        if (shared_memory_typed_views_) {
+          srv.type = dxbc::RdefInputType::kTexture;
+          srv.return_type = dxbc::ResourceReturnType::kUInt;
+          srv.sample_count = UINT32_MAX;
+        } else {
+          srv.type = dxbc::RdefInputType::kByteAddress;
+          srv.return_type = dxbc::ResourceReturnType::kMixed;
+        }
         srv.dimension = dxbc::RdefDimension::kSRVBuffer;
         srv.bind_point = uint32_t(SRVMainRegister::kSharedMemory);
         srv.bind_count = 1;
@@ -2432,8 +2440,14 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
       if (i == uav_index_shared_memory_) {
         // Shared memory (when memexport is used in the pipeline).
         uav.name_ptr = shared_memory_uav_name_ptr;
-        uav.type = dxbc::RdefInputType::kUAVRWByteAddress;
-        uav.return_type = dxbc::ResourceReturnType::kMixed;
+        if (shared_memory_typed_views_) {
+          uav.type = dxbc::RdefInputType::kUAVRWTyped;
+          uav.return_type = dxbc::ResourceReturnType::kUInt;
+          uav.sample_count = UINT32_MAX;
+        } else {
+          uav.type = dxbc::RdefInputType::kUAVRWByteAddress;
+          uav.return_type = dxbc::ResourceReturnType::kMixed;
+        }
         uav.dimension = dxbc::RdefDimension::kUAVBuffer;
         uav.bind_point = uint32_t(UAVRegister::kSharedMemory);
       } else if (i == uav_index_edram_) {
@@ -3176,11 +3190,18 @@ void DxbcShaderTranslator::WriteShaderCode() {
   // Shader resource views, sorted by binding index.
   for (uint32_t i = 0; i < srv_count_; ++i) {
     if (i == srv_index_shared_memory_) {
-      // Shared memory ByteAddressBuffer.
-      ao_.OpDclResourceRaw(dxbc::Src::T(dxbc::Src::Dcl, srv_index_shared_memory_,
-                                        uint32_t(SRVMainRegister::kSharedMemory),
-                                        uint32_t(SRVMainRegister::kSharedMemory)),
-                           uint32_t(SRVSpace::kMain));
+      dxbc::Src shared_memory_dcl(dxbc::Src::T(dxbc::Src::Dcl, srv_index_shared_memory_,
+                                               uint32_t(SRVMainRegister::kSharedMemory),
+                                               uint32_t(SRVMainRegister::kSharedMemory)));
+      if (shared_memory_typed_views_) {
+        // Shared memory Buffer<uint>.
+        ao_.OpDclResource(dxbc::ResourceDimension::kBuffer,
+                          dxbc::ResourceReturnTypeX4Token(dxbc::ResourceReturnType::kUInt),
+                          shared_memory_dcl, uint32_t(SRVSpace::kMain));
+      } else {
+        // Shared memory ByteAddressBuffer.
+        ao_.OpDclResourceRaw(shared_memory_dcl, uint32_t(SRVSpace::kMain));
+      }
     } else {
       // Texture or texture heap.
       dxbc::ResourceDimension texture_dimension;
@@ -3234,13 +3255,21 @@ void DxbcShaderTranslator::WriteShaderCode() {
   // Unordered access views, sorted by binding index.
   for (uint32_t i = 0; i < uav_count_; ++i) {
     if (i == uav_index_shared_memory_) {
-      // Shared memory RWByteAddressBuffer.
       if (!is_pixel_shader()) {
         shader_feature_info_.feature_flags[0] |= dxbc::kShaderFeature0_UAVsAtEveryStage;
       }
-      ao_.OpDclUnorderedAccessViewRaw(0, dxbc::Src::U(dxbc::Src::Dcl, uav_index_shared_memory_,
-                                                      uint32_t(UAVRegister::kSharedMemory),
-                                                      uint32_t(UAVRegister::kSharedMemory)));
+      dxbc::Src shared_memory_dcl(dxbc::Src::U(dxbc::Src::Dcl, uav_index_shared_memory_,
+                                               uint32_t(UAVRegister::kSharedMemory),
+                                               uint32_t(UAVRegister::kSharedMemory)));
+      if (shared_memory_typed_views_) {
+        // Shared memory RWBuffer<uint>.
+        ao_.OpDclUnorderedAccessViewTyped(
+            dxbc::ResourceDimension::kBuffer, 0,
+            dxbc::ResourceReturnTypeX4Token(dxbc::ResourceReturnType::kUInt), shared_memory_dcl);
+      } else {
+        // Shared memory RWByteAddressBuffer.
+        ao_.OpDclUnorderedAccessViewRaw(0, shared_memory_dcl);
+      }
     } else if (i == uav_index_edram_) {
       // EDRAM buffer R32_UINT rasterizer-ordered view.
       shader_feature_info_.feature_flags[0] |= dxbc::kShaderFeature0_ROVs;

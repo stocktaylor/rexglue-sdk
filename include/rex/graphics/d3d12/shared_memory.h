@@ -19,6 +19,7 @@
 #include <rex/graphics/shared_memory.h>
 #include <rex/memory.h>
 #include <rex/ui/d3d12/d3d12_api.h>
+#include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/d3d12/d3d12_upload_buffer_pool.h>
 
 namespace rex::graphics::d3d12 {
@@ -66,8 +67,21 @@ class D3D12SharedMemory : public SharedMemory {
     }
   }
 
+  // Whether translated shaders access shared memory through R32_UINT typed
+  // buffer views instead of raw (ByteAddressBuffer) ones. Qualcomm Adreno
+  // drivers on Windows mishandle raw views larger than 256 MB (a 512 MB raw SRV
+  // returns wrong data everywhere, a raw UAV wraps at 2^28 bytes), while typed
+  // views of any size work. Must agree with the DxbcShaderTranslator option.
+  static bool ShouldUseTypedViews(const ui::d3d12::D3D12Provider& provider);
+  bool uses_typed_views() const { return typed_views_; }
+
+  // The views translated shaders bind for shared memory: raw, or R32_UINT
+  // typed if uses_typed_views().
   void WriteRawSRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle);
   void WriteRawUAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle);
+  // Null views of the same kind, for the unused one of the SRV / UAV pair.
+  void WriteNullSRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
+  void WriteNullUAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
   // Due to the D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP limitation, the
   // smallest supported formats are 32-bit.
   void WriteUintPow2SRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle,
@@ -91,6 +105,8 @@ class D3D12SharedMemory : public SharedMemory {
   D3D12_RESOURCE_STATES buffer_state_ = D3D12_RESOURCE_STATE_COPY_DEST;
   bool buffer_uav_writes_commit_needed_ = false;
   void CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATES new_state);
+
+  bool typed_views_ = false;
 
   // Non-shader-visible buffer descriptor heap for faster binding (via copying
   // rather than creation).

@@ -152,6 +152,13 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
   // compromise between AMD, where there are load_dwordx2/3/4, and Nvidia, where
   // a ByteAddressBuffer is more like an R32_UINT buffer.
 
+  // With typed (R32_UINT) shared memory views, address by dword index, which
+  // both the SRV and the UAV branches below start from.
+  if (shared_memory_typed_views_) {
+    a_.OpUShR(address_temp_dest, address_src, dxbc::Src::LU(2));
+    address_src = address_temp_src;
+  }
+
   // Depending on whether the shared memory is bound as an SRV or as a UAV (if
   // memexport is used), fetch from the appropriate binding. Extract whether
   // shared memory is a UAV to system_temp_result_.x and check. In the `if`, put
@@ -174,6 +181,29 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
           : dxbc::Src::T(srv_index_shared_memory_, uint32_t(SRVMainRegister::kSharedMemory)));
     uint32_t needed_words_remaining = needed_words;
     uint32_t word_index_previous = first_word_index;
+    if (shared_memory_typed_views_) {
+      // One typed load per dword, replicating the R32_UINT value into the
+      // word's component. The address (system_temp_result_.w) is only
+      // overwritten by the last load, word 3.
+      while (needed_words_remaining) {
+        uint32_t word_index;
+        rex::bit_scan_forward(needed_words_remaining, &word_index);
+        needed_words_remaining &= ~(uint32_t(1) << word_index);
+        if (word_index != word_index_previous) {
+          a_.OpIAdd(address_temp_dest, address_src,
+                    dxbc::Src::LU(word_index - word_index_previous));
+          address_src = address_temp_src;
+          word_index_previous = word_index;
+        }
+        dxbc::Dest word_result_dest(dxbc::Dest::R(system_temp_result_, uint32_t(1) << word_index));
+        if (i) {
+          a_.OpLdUAVTyped(word_result_dest, address_src, 1, shared_memory_src.Select(0));
+        } else {
+          a_.OpLd(word_result_dest, address_src, 0b0001, shared_memory_src.Select(0));
+        }
+      }
+      continue;
+    }
     while (needed_words_remaining) {
       uint32_t word_index;
       rex::bit_scan_forward(needed_words_remaining, &word_index);

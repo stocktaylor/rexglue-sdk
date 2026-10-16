@@ -50,7 +50,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
   DxbcShaderTranslator(ui::GraphicsProvider::GpuVendorID vendor_id, bool bindless_resources_used,
                        bool edram_rov_used, bool gamma_render_target_as_unorm8 = false,
                        bool msaa_2x_supported = true, uint32_t draw_resolution_scale_x = 1,
-                       uint32_t draw_resolution_scale_y = 1, bool force_emit_source_map = false);
+                       uint32_t draw_resolution_scale_y = 1, bool force_emit_source_map = false,
+                       bool shared_memory_typed_views = false);
   ~DxbcShaderTranslator() override;
 
   // Stage linkage ordering and rules (must be respected not only within the
@@ -924,6 +925,12 @@ class DxbcShaderTranslator : public ShaderTranslator {
 
   // Whether the output merger should be emulated in pixel shaders.
   bool edram_rov_used_;
+
+  // Whether shared memory is bound as an R32_UINT typed buffer (SRV and UAV)
+  // rather than a raw one, with vertex fetch and memexport accessing it one
+  // dword at a time. Works around drivers that mishandle raw views over
+  // 256 MB (Qualcomm on Windows); see D3D12SharedMemory::ShouldUseTypedViews.
+  bool shared_memory_typed_views_;
 
   // Whether with RTV-based output-merger, k_8_8_8_8_GAMMA render targets are
   // stored as 8-bit with shader-side gamma conversion.

@@ -11,13 +11,13 @@
 #pragma once
 
 #include <rex/input/input_driver.h>
+#include <rex/input/keystroke_synth.h>
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 
 #include <atomic>
 #include <cstdint>
 #include <mutex>
-#include <queue>
 #include <string>
 
 namespace rex::input::mnk {
@@ -57,9 +57,18 @@ class MnkInputDriver final : public InputDriver,
   void OnGotFocus(rex::ui::UISetupEvent& e) override;
 
  private:
+  // The controller the bound keys make, before the mouse and clamping.
+  struct BindState {
+    uint16_t buttons = 0;
+    uint8_t left_trigger = 0;
+    uint8_t right_trigger = 0;
+    int32_t lx = 0, ly = 0, rx = 0, ry = 0;
+  };
+
   bool IsEnabled() const;
   void SetKeyState(uint16_t vk, bool down);
-  void EnqueueKeystroke(uint16_t vk_pad, bool down);
+  // Called with state_mutex_ held.
+  BindState ReadBindsLocked() const;
 
   // Called from the guest thread. The rest of the capture path stays on the UI
   // thread, since every Window call in it reaches SDL.
@@ -99,8 +108,8 @@ class MnkInputDriver final : public InputDriver,
 
   std::atomic<bool> has_focus_{true};
 
-  // Keystroke queue
-  std::queue<X_INPUT_KEYSTROKE> keystroke_queue_;
+  // Keystroke events from the bound keys' controller state (state_mutex_).
+  KeystrokeSynthesizer keystroke_;
 
   // Packet number incremented on state change
   uint32_t packet_number_ = 0;

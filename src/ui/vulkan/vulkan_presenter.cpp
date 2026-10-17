@@ -1381,7 +1381,10 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
   // interfering with GPU command processing, and also to allow tearing so
   // variable refresh rate may be used where it's available.
   // Note: If the priorities here are changes, update the cvar descriptions.
-  if (REXCVAR_GET(vulkan_allow_present_mode_immediate) &&
+  // With vsync on, no tearing: mailbox or FIFO (applies to swapchains created
+  // after a change). vsync belongs to the graphics library, hence by name.
+  bool vsync = rex::cvar::GetFlagByName("vsync") == "true";
+  if (!vsync && REXCVAR_GET(vulkan_allow_present_mode_immediate) &&
       std::find(present_modes.cbegin(), present_modes.cend(), VK_PRESENT_MODE_IMMEDIATE_KHR) !=
           present_modes.cend()) {
     // Allowing tearing to reduce latency, and possibly variable refresh rate

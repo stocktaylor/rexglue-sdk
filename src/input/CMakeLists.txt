@@ -5,6 +5,7 @@ add_library(rexinput OBJECT
     input_system.cpp
     device_assignment.cpp
     state_merge.cpp
+    keystroke_synth.cpp
     mnk/mnk_input_driver.cpp
     nop/nop_input_driver.cpp
 )

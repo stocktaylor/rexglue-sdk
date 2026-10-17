@@ -254,6 +254,62 @@ X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
+MnkInputDriver::BindState MnkInputDriver::ReadBindsLocked() const {
+  BindState b;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
+    b.buttons |= X_INPUT_GAMEPAD_A;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_b)))
+    b.buttons |= X_INPUT_GAMEPAD_B;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_x)))
+    b.buttons |= X_INPUT_GAMEPAD_X;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_y)))
+    b.buttons |= X_INPUT_GAMEPAD_Y;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_left_shoulder)))
+    b.buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_right_shoulder)))
+    b.buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_press)))
+    b.buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_press)))
+    b.buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_back)))
+    b.buttons |= X_INPUT_GAMEPAD_BACK;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_start)))
+    b.buttons |= X_INPUT_GAMEPAD_START;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_guide)))
+    b.buttons |= X_INPUT_GAMEPAD_GUIDE;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_up)))
+    b.buttons |= X_INPUT_GAMEPAD_DPAD_UP;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_down)))
+    b.buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_left)))
+    b.buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_right)))
+    b.buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
+
+  b.left_trigger = IsBindPressed(key_down_, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
+  b.right_trigger = IsBindPressed(key_down_, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
+
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_left)))
+    b.lx -= INT16_MAX;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_right)))
+    b.lx += INT16_MAX;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_up)))
+    b.ly += INT16_MAX;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_down)))
+    b.ly -= INT16_MAX;
+
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_left)))
+    b.rx -= INT16_MAX;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_right)))
+    b.rx += INT16_MAX;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_up)))
+    b.ry += INT16_MAX;
+  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
+    b.ry -= INT16_MAX;
+  return b;
+}
+
 X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   if (!IsEnabled() || id != kMnkDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -274,62 +330,14 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
 
   std::lock_guard lock(state_mutex_);
 
-  uint16_t buttons = 0;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
-    buttons |= X_INPUT_GAMEPAD_A;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_b)))
-    buttons |= X_INPUT_GAMEPAD_B;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_x)))
-    buttons |= X_INPUT_GAMEPAD_X;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_y)))
-    buttons |= X_INPUT_GAMEPAD_Y;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_left_shoulder)))
-    buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_right_shoulder)))
-    buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_press)))
-    buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_press)))
-    buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_back)))
-    buttons |= X_INPUT_GAMEPAD_BACK;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_start)))
-    buttons |= X_INPUT_GAMEPAD_START;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_guide)))
-    buttons |= X_INPUT_GAMEPAD_GUIDE;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_up)))
-    buttons |= X_INPUT_GAMEPAD_DPAD_UP;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_down)))
-    buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_left)))
-    buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_right)))
-    buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
-
-  uint8_t lt = IsBindPressed(key_down_, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
-  uint8_t rt = IsBindPressed(key_down_, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
-
-  int32_t lx = 0;
-  int32_t ly = 0;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_left)))
-    lx -= INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_right)))
-    lx += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_up)))
-    ly += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_down)))
-    ly -= INT16_MAX;
-
-  int32_t rx = 0;
-  int32_t ry = 0;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_left)))
-    rx -= INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_right)))
-    rx += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_up)))
-    ry += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
-    ry -= INT16_MAX;
+  BindState binds = ReadBindsLocked();
+  uint16_t buttons = binds.buttons;
+  uint8_t lt = binds.left_trigger;
+  uint8_t rt = binds.right_trigger;
+  int32_t lx = binds.lx;
+  int32_t ly = binds.ly;
+  int32_t rx = binds.rx;
+  int32_t ry = binds.ry;
 
   if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
     double sensitivity = REXCVAR_GET(mnk_sensitivity);
@@ -374,26 +382,25 @@ X_RESULT MnkInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
   if (!IsEnabled() || id != kMnkDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
+  // XUI titles (the dashboard) navigate on keystrokes alone. Inactive or
+  // unfocused reads as nothing held, so held keys send their up events.
+  bool active = is_active() && has_focus_;
   std::lock_guard lock(state_mutex_);
-  if (keystroke_queue_.empty()) {
-    return X_ERROR_EMPTY;
+  X_INPUT_GAMEPAD gamepad = {};
+  if (active) {
+    BindState binds = ReadBindsLocked();
+    auto clamp16 = [](int32_t v) -> int16_t {
+      return static_cast<int16_t>(std::clamp(v, (int32_t)INT16_MIN, (int32_t)INT16_MAX));
+    };
+    gamepad.buttons = binds.buttons;
+    gamepad.left_trigger = binds.left_trigger;
+    gamepad.right_trigger = binds.right_trigger;
+    gamepad.thumb_lx = clamp16(binds.lx);
+    gamepad.thumb_ly = clamp16(binds.ly);
+    gamepad.thumb_rx = clamp16(binds.rx);
+    gamepad.thumb_ry = clamp16(binds.ry);
   }
-  if (out_keystroke) {
-    *out_keystroke = keystroke_queue_.front();
-  }
-  keystroke_queue_.pop();
-  return X_ERROR_SUCCESS;
-}
-
-void MnkInputDriver::EnqueueKeystroke(uint16_t vk_pad, bool down) {
-  X_INPUT_KEYSTROKE ks = {};
-  ks.virtual_key = vk_pad;
-  ks.unicode = 0;
-  ks.flags = down ? X_INPUT_KEYSTROKE_KEYDOWN : X_INPUT_KEYSTROKE_KEYUP;
-  // InputSystem stamps the guest user this device is assigned to.
-  ks.user_index = 0;
-  ks.hid_code = 0;
-  keystroke_queue_.push(ks);
+  return keystroke_.Next(gamepad, out_keystroke);
 }
 
 void MnkInputDriver::QueueMouseCaptureUpdate(bool should_capture) {

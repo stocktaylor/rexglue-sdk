@@ -17,13 +17,9 @@
 #include <vector>
 
 #include <rex/input/input_driver.h>
+#include <rex/input/keystroke_synth.h>
 
 #include <SDL3/SDL.h>
-
-#define HID_SDL_THUMB_THRES 0x4E00
-#define HID_SDL_TRIGG_THRES 0x1F
-#define HID_SDL_REPEAT_DELAY 400
-#define HID_SDL_REPEAT_RATE 100
 
 namespace rex::input::sdl {
 
@@ -44,20 +40,6 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   void OnWindowAvailable(rex::ui::Window* window) override;
 
  private:
-  enum class RepeatState {
-    Idle,       // no buttons pressed or repeating has ended
-    Waiting,    // a button is held and the delay is awaited
-    Repeating,  // actively repeating at a rate
-  };
-  struct KeystrokeState {
-    uint64_t buttons;
-    RepeatState repeat_state;
-    // the button number that was pressed last:
-    uint8_t repeat_butt_idx;
-    // the last time (ms) a down (and/or repeat) event for that button was send:
-    uint32_t repeat_time;
-  };
-
   struct ControllerState {
     SDL_Gamepad* sdl;
     X_INPUT_CAPABILITIES caps;
@@ -66,7 +48,7 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     bool is_active;
     DeviceId id;
     // Per pad rather than per guest user, so it survives reassignment.
-    KeystrokeState keystroke;
+    KeystrokeSynthesizer keystroke;
   };
 
   // WindowListener
@@ -82,7 +64,6 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   void OnControllerDeviceAxisMotionLocked(const SDL_Event& event);
   void OnControllerDeviceButtonChangedLocked(const SDL_Event& event);
 
-  inline uint64_t AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad) const;
   std::optional<size_t> GetControllerIndexFromInstanceID(SDL_JoystickID instance_id);
   ControllerState* FindController(DeviceId id);
   DeviceId AllocateDeviceId();

@@ -254,50 +254,6 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
     return X_ERROR_BAD_ARGUMENTS;
   }
 
-  // The order of this list is also the order in which events are send if
-  // multiple buttons change at once.
-  static_assert(sizeof(X_INPUT_GAMEPAD::buttons) == 2);
-  static constexpr std::array<rex::ui::VirtualKey, 34> kVkLookup = {
-      // 00 - True buttons from xinput button field
-      rex::ui::VirtualKey::kXInputPadDpadUp,
-      rex::ui::VirtualKey::kXInputPadDpadDown,
-      rex::ui::VirtualKey::kXInputPadDpadLeft,
-      rex::ui::VirtualKey::kXInputPadDpadRight,
-      rex::ui::VirtualKey::kXInputPadStart,
-      rex::ui::VirtualKey::kXInputPadBack,
-      rex::ui::VirtualKey::kXInputPadLThumbPress,
-      rex::ui::VirtualKey::kXInputPadRThumbPress,
-      rex::ui::VirtualKey::kXInputPadLShoulder,
-      rex::ui::VirtualKey::kXInputPadRShoulder,
-      rex::ui::VirtualKey::kNone, /* Guide has no VK */
-      rex::ui::VirtualKey::kNone, /* Unknown */
-      rex::ui::VirtualKey::kXInputPadA,
-      rex::ui::VirtualKey::kXInputPadB,
-      rex::ui::VirtualKey::kXInputPadX,
-      rex::ui::VirtualKey::kXInputPadY,
-      // 16 - Fake buttons generated from analog inputs
-      rex::ui::VirtualKey::kXInputPadLTrigger,
-      rex::ui::VirtualKey::kXInputPadRTrigger,
-      // 18
-      rex::ui::VirtualKey::kXInputPadLThumbUp,
-      rex::ui::VirtualKey::kXInputPadLThumbDown,
-      rex::ui::VirtualKey::kXInputPadLThumbRight,
-      rex::ui::VirtualKey::kXInputPadLThumbLeft,
-      rex::ui::VirtualKey::kXInputPadLThumbUpLeft,
-      rex::ui::VirtualKey::kXInputPadLThumbUpRight,
-      rex::ui::VirtualKey::kXInputPadLThumbDownRight,
-      rex::ui::VirtualKey::kXInputPadLThumbDownLeft,
-      // 26
-      rex::ui::VirtualKey::kXInputPadRThumbUp,
-      rex::ui::VirtualKey::kXInputPadRThumbDown,
-      rex::ui::VirtualKey::kXInputPadRThumbRight,
-      rex::ui::VirtualKey::kXInputPadRThumbLeft,
-      rex::ui::VirtualKey::kXInputPadRThumbUpLeft,
-      rex::ui::VirtualKey::kXInputPadRThumbUpRight,
-      rex::ui::VirtualKey::kXInputPadRThumbDownRight,
-      rex::ui::VirtualKey::kXInputPadRThumbDownLeft,
-  };
-
   auto is_active = this->is_active();
 
   if (is_active) {
@@ -312,79 +268,10 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
   }
 
   // If input is not active (e.g. due to a dialog overlay), force buttons to
-  // "unpressed". The algorithm will automatically send UP events when
-  // 'is_active()' goes low and DOWN events when it goes high again.
-  const uint64_t curr_butts =
-      is_active ? (static_cast<uint64_t>(static_cast<uint16_t>(controller->state.gamepad.buttons)) |
-                   AnalogToKeyfield(controller->state.gamepad))
-                : uint64_t(0);
-  KeystrokeState& last = controller->keystroke;
-
-  // Handle repeating
-  auto guest_now = rex::chrono::Clock::QueryGuestUptimeMillis();
-  static_assert(HID_SDL_REPEAT_DELAY >= HID_SDL_REPEAT_RATE);
-  if (last.repeat_state == RepeatState::Waiting &&
-      (last.repeat_time + HID_SDL_REPEAT_DELAY < guest_now)) {
-    last.repeat_state = RepeatState::Repeating;
-  }
-  if (last.repeat_state == RepeatState::Repeating &&
-      (last.repeat_time + HID_SDL_REPEAT_RATE < guest_now)) {
-    last.repeat_time = guest_now;
-    rex::ui::VirtualKey vk = kVkLookup.at(last.repeat_butt_idx);
-    assert_true(vk != rex::ui::VirtualKey::kNone);
-    out_keystroke->virtual_key = uint16_t(vk);
-    out_keystroke->unicode = 0;
-    // InputSystem stamps the guest user this device is assigned to.
-    out_keystroke->user_index = 0;
-    out_keystroke->hid_code = 0;
-    out_keystroke->flags = X_INPUT_KEYSTROKE_KEYDOWN | X_INPUT_KEYSTROKE_REPEAT;
-    return X_ERROR_SUCCESS;
-  }
-
-  auto butts_changed = curr_butts ^ last.buttons;
-  if (!butts_changed) {
-    return X_ERROR_EMPTY;
-  }
-
-  // First try to clear buttons with up events. This is to match xinput
-  // behavior when transitioning thumb sticks, e.g. so that THUMB_UPLEFT is
-  // up before THUMB_LEFT is down.
-  for (auto [clear_pass, pass] = std::tuple{true, 0}; pass < 2; clear_pass = false, pass++) {
-    for (uint8_t i = 0; i < uint8_t(std::size(kVkLookup)); i++) {
-      auto fbutton = uint64_t(1) << i;
-      if (!(butts_changed & fbutton)) {
-        continue;
-      }
-      rex::ui::VirtualKey vk = kVkLookup.at(i);
-      if (vk == rex::ui::VirtualKey::kNone) {
-        continue;
-      }
-
-      out_keystroke->virtual_key = uint16_t(vk);
-      out_keystroke->unicode = 0;
-      out_keystroke->user_index = 0;
-      out_keystroke->hid_code = 0;
-
-      bool is_pressed = curr_butts & fbutton;
-      if (clear_pass && !is_pressed) {
-        // up
-        out_keystroke->flags = X_INPUT_KEYSTROKE_KEYUP;
-        last.buttons &= ~fbutton;
-        last.repeat_state = RepeatState::Idle;
-        return X_ERROR_SUCCESS;
-      }
-      if (!clear_pass && is_pressed) {
-        // down
-        out_keystroke->flags = X_INPUT_KEYSTROKE_KEYDOWN;
-        last.buttons |= fbutton;
-        last.repeat_state = RepeatState::Waiting;
-        last.repeat_butt_idx = i;
-        last.repeat_time = guest_now;
-        return X_ERROR_SUCCESS;
-      }
-    }
-  }
-  return X_ERROR_EMPTY;
+  // "unpressed". The synthesizer sends UP events when 'is_active()' goes low
+  // and DOWN events when it goes high again.
+  return controller->keystroke.Next(is_active ? controller->state.gamepad : X_INPUT_GAMEPAD{},
+                                    out_keystroke);
 }
 
 void SDLInputDriver::HandleEvent(const SDL_Event& event) {
@@ -678,48 +565,6 @@ void SDLInputDriver::QueueControllerUpdate() {
       sdl_pumpevents_queued_ = false;
     });
   }
-}
-
-// Check if the analog inputs exceed their thresholds to become a button press
-// and build the bitfield.
-inline uint64_t SDLInputDriver::AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad) const {
-  uint64_t f = 0;
-
-  f |= static_cast<uint64_t>(gamepad.left_trigger > HID_SDL_TRIGG_THRES) << 16;
-  f |= static_cast<uint64_t>(gamepad.right_trigger > HID_SDL_TRIGG_THRES) << 17;
-
-  auto thumb_x = static_cast<int16_t>(gamepad.thumb_lx);
-  auto thumb_y = static_cast<int16_t>(gamepad.thumb_ly);
-  for (size_t i = 0; i <= 8; i = i + 8) {
-    uint64_t u = thumb_y > HID_SDL_THUMB_THRES;
-    uint64_t d = thumb_y < ~HID_SDL_THUMB_THRES;
-    uint64_t r = thumb_x > HID_SDL_THUMB_THRES;
-    uint64_t l = thumb_x < ~HID_SDL_THUMB_THRES;
-    if (u && l) {
-      u = l = 0;
-      f |= uint64_t(1) << (22 + i);
-    }
-    if (u && r) {
-      u = r = 0;
-      f |= uint64_t(1) << (23 + i);
-    }
-    if (d && r) {
-      d = r = 0;
-      f |= uint64_t(1) << (24 + i);
-    }
-    if (d && l) {
-      d = l = 0;
-      f |= uint64_t(1) << (25 + i);
-    }
-    f |= u << (18 + i);
-    f |= d << (19 + i);
-    f |= r << (20 + i);
-    f |= l << (21 + i);
-
-    thumb_x = static_cast<int16_t>(gamepad.thumb_rx);
-    thumb_y = static_cast<int16_t>(gamepad.thumb_ry);
-  }
-  return f;
 }
 
 }  // namespace rex::input::sdl

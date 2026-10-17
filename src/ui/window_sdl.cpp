@@ -27,6 +27,7 @@
 #include <rex/platform.h>
 #include <rex/ui/flags.h>
 #include <rex/ui/sdl_virtual_key.h>
+#include <rex/ui/surface_sdl.h>
 
 #if REX_PLATFORM_WIN32
 #include <rex/ui/surface_win.h>
@@ -435,7 +436,22 @@ std::unique_ptr<Surface> WindowSDL::CreateSurfaceImpl(Surface::TypeFlags allowed
     }
   }
 #endif
+  if (allowed_types & Surface::kTypeFlag_SdlWindow) {
+    return std::make_unique<SdlWindowSurface>(sdl_window_);
+  }
   return nullptr;
+}
+
+bool SdlWindowSurface::GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const {
+  int width = 0, height = 0;
+  if (!window_ || !SDL_GetWindowSizeInPixels(window_, &width, &height)) {
+    width_out = 0;
+    height_out = 0;
+    return false;
+  }
+  width_out = uint32_t(std::max(width, 0));
+  height_out = uint32_t(std::max(height, 0));
+  return true;
 }
 
 void WindowSDL::RequestPaintImpl() {

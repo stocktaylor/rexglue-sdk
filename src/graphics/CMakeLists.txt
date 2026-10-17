@@ -28,6 +28,11 @@ set(REXGPU_XENOS_SOURCES
     pipeline/shader/interpreter.cpp
     pipeline/shader/translator.cpp
     pipeline/shader/translator_disasm.cpp
+
+    # Null backend (always built: needs no host GPU API)
+    null/graphics_system.cpp
+    null/command_processor.cpp
+    null/wireframe_sampler.cpp
 )
 
 # SPIR-V shader translation

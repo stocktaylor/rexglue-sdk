@@ -68,6 +68,8 @@ struct RuntimeConfig {
   // GPU emulation plugin loaded by ReXApp when `graphics` is empty
   // (e.g. "xenos"); empty means no GPU emulation.
   std::string gpu_plugin;
+  // Backend inside the plugin: "d3d12", "vulkan", "null", or "any".
+  std::string gpu_backend = "any";
   std::function<std::unique_ptr<system::IAudioSystem>(runtime::FunctionDispatcher*)> audio_factory;
   std::function<std::unique_ptr<system::IInputSystem>(bool tool_mode)> input_factory;
   std::function<void(Runtime*, system::KernelState*)> kernel_init;

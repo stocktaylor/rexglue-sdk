@@ -11,6 +11,7 @@
 
 #include <string_view>
 
+#include <rex/graphics/null/graphics_system.h>
 #include <rex/logging.h>
 #include <rex/system/gpu_plugin.h>
 
@@ -48,6 +49,10 @@ extern "C" REX_GPU_PLUGIN_EXPORT rex::system::IGraphicsSystem* rex_gpu_create(
     return new rex::graphics::vulkan::VulkanGraphicsSystem();
   }
 #endif
+  // Last resort for "any": a build with no host GPU API still runs titles.
+  if (backend == "any" || backend == "null") {
+    return new rex::graphics::null::NullGraphicsSystem();
+  }
   REXLOG_ERROR("rexgpu-xenos: requested backend '{}' is not compiled into this plugin", backend);
   return nullptr;
 }

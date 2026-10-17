@@ -6,13 +6,17 @@
 #include <rex/system/function_dispatcher.h>
 
 {% if is_dll %}
-#ifdef _WIN32
-#define REX_MODULE_EXPORT __declspec(dllexport)
+#if defined(__EMSCRIPTEN__)
+// WebAssembly links every module into the executable (no dlopen): keep these
+// local, as each module defines them, and register with the runtime instead.
+#define REX_MODULE_FUNC static
+#elif defined(_WIN32)
+#define REX_MODULE_FUNC extern "C" __declspec(dllexport)
 #else
-#define REX_MODULE_EXPORT __attribute__((visibility("default")))
+#define REX_MODULE_FUNC extern "C" __attribute__((visibility("default")))
 #endif
 
-extern "C" REX_MODULE_EXPORT
+REX_MODULE_FUNC
 void ReXModule_Register(rex::runtime::IModuleRegistrar* registrar) {
 {% else %}
 void {{ project }}_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) {
@@ -23,8 +27,13 @@ void {{ project }}_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
 {% if is_dll %}
 // The runtime uses this baked layout for the dispatch table. It must match the
 // constants used by this module's REX_LOOKUP_FUNC macro.
-extern "C" REX_MODULE_EXPORT
+REX_MODULE_FUNC
 const rex::PPCImageInfo* ReXModule_GetImageInfo() {
   return &PPCImageConfig;
 }
+
+#if defined(__EMSCRIPTEN__)
+static const bool kReXModuleRegistered =
+    rex::runtime::RegisterStaticModule(ReXModule_GetImageInfo(), ReXModule_Register);
+#endif
 {% endif %}

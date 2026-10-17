@@ -780,45 +780,59 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
     }
 
     rex::platform::DynamicLibrary library_local;
-    auto lib_path = ModuleLibraryPath(recomp->shared_lib_name);
-    if (!library_local.Load(lib_path, rex::platform::SymbolResolution::kImmediate)) {
-      REXSYS_ERROR("Failed to load shared library {} for module '{}'", lib_path.string(),
-                   recomp->pe_name);
+    runtime::FunctionDispatcher::RegisterFn register_func = nullptr;
+    const rex::PPCImageInfo* image_info = nullptr;
+    bool have_module = false;
+    // Linked into the executable (always the case on WebAssembly)?
+    if (const auto* static_module =
+            runtime::FindStaticModule(module->xex_module()->base_address())) {
+      register_func = static_module->register_func;
+      image_info = static_module->image_info;
+      have_module = true;
     } else {
-      auto register_func = reinterpret_cast<runtime::FunctionDispatcher::RegisterFn>(
-          library_local.GetRawSymbol("ReXModule_Register"));
-      using GetImageInfoFn = const rex::PPCImageInfo* (*)();
-      auto get_image_info =
-          reinterpret_cast<GetImageInfoFn>(library_local.GetRawSymbol("ReXModule_GetImageInfo"));
-      if (!register_func) {
-        REXSYS_ERROR("ReXModule_Register not found in '{}'", recomp->shared_lib_name);
-      } else if (!get_image_info) {
-        REXSYS_ERROR("ReXModule_GetImageInfo not found in '{}'", recomp->shared_lib_name);
+      auto lib_path = ModuleLibraryPath(recomp->shared_lib_name);
+      if (!library_local.Load(lib_path, rex::platform::SymbolResolution::kImmediate)) {
+        REXSYS_ERROR("Failed to load shared library {} for module '{}'", lib_path.string(),
+                     recomp->pe_name);
       } else {
-        auto* xex = module->xex_module();
-        const auto* image_info = get_image_info();
-        if (!image_info) {
-          REXSYS_ERROR("ReXModule_GetImageInfo returned null for '{}'", recomp->shared_lib_name);
-        } else if (image_info->image_base != xex->base_address() ||
-                   image_info->image_size != xex->image_size()) {
-          REXSYS_ERROR(
-              "Recompiled module '{}' layout does not match loaded XEX "
-              "(DLL image={:08X}-{:08X}, XEX image={:08X}-{:08X})",
-              recomp->pe_name, image_info->image_base,
-              image_info->image_base + image_info->image_size, xex->base_address(),
-              xex->base_address() + xex->image_size());
-        } else if (!function_dispatcher_->InitializeFunctionTable(
-                       image_info->code_base, image_info->code_size, image_info->image_base,
-                       image_info->image_size)) {
-          REXSYS_ERROR("InitializeFunctionTable failed for module '{}'", recomp->pe_name);
+        register_func = reinterpret_cast<runtime::FunctionDispatcher::RegisterFn>(
+            library_local.GetRawSymbol("ReXModule_Register"));
+        using GetImageInfoFn = const rex::PPCImageInfo* (*)();
+        auto get_image_info =
+            reinterpret_cast<GetImageInfoFn>(library_local.GetRawSymbol("ReXModule_GetImageInfo"));
+        if (!register_func) {
+          REXSYS_ERROR("ReXModule_Register not found in '{}'", recomp->shared_lib_name);
+        } else if (!get_image_info) {
+          REXSYS_ERROR("ReXModule_GetImageInfo not found in '{}'", recomp->shared_lib_name);
         } else {
-          function_dispatcher_->RegisterModule(lib_key, image_info->code_base, register_func);
-          auto global_lock = global_critical_region_.Acquire();
-          auto lib_it = module_libraries_.find(lib_key);
-          assert_true(lib_it != module_libraries_.end());
-          lib_it->second = std::move(library_local);
-          wired_recomp = true;
+          image_info = get_image_info();
+          have_module = true;
         }
+      }
+    }
+    if (have_module) {
+      auto* xex = module->xex_module();
+      if (!image_info) {
+        REXSYS_ERROR("ReXModule_GetImageInfo returned null for '{}'", recomp->shared_lib_name);
+      } else if (image_info->image_base != xex->base_address() ||
+                 image_info->image_size != xex->image_size()) {
+        REXSYS_ERROR(
+            "Recompiled module '{}' layout does not match loaded XEX "
+            "(DLL image={:08X}-{:08X}, XEX image={:08X}-{:08X})",
+            recomp->pe_name, image_info->image_base,
+            image_info->image_base + image_info->image_size, xex->base_address(),
+            xex->base_address() + xex->image_size());
+      } else if (!function_dispatcher_->InitializeFunctionTable(
+                     image_info->code_base, image_info->code_size, image_info->image_base,
+                     image_info->image_size)) {
+        REXSYS_ERROR("InitializeFunctionTable failed for module '{}'", recomp->pe_name);
+      } else {
+        function_dispatcher_->RegisterModule(lib_key, image_info->code_base, register_func);
+        auto global_lock = global_critical_region_.Acquire();
+        auto lib_it = module_libraries_.find(lib_key);
+        assert_true(lib_it != module_libraries_.end());
+        lib_it->second = std::move(library_local);
+        wired_recomp = true;
       }
     }
 

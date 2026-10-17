@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include <rex/image_info.h>
 #include <rex/memory.h>
 #include <rex/memory/mapped_memory.h>
 #include <rex/ppc/func.h>
@@ -155,5 +156,20 @@ class FunctionDispatcher : public IModuleRegistrar {
   // Protects dispatcher metadata during module registration and callback dispatch.
   mutable std::recursive_mutex dispatch_mutex_;
 };
+
+/**
+ * Recompiled DLL modules linked into the executable (WebAssembly has no
+ * dlopen) register here during static initialization, keyed by image base.
+ * KernelState::LoadUserModule looks a module up here before loading it as a
+ * shared library.
+ */
+struct StaticModule {
+  const ::rex::PPCImageInfo* image_info;
+  FunctionDispatcher::RegisterFn register_func;
+};
+
+bool RegisterStaticModule(const ::rex::PPCImageInfo* image_info,
+                          FunctionDispatcher::RegisterFn register_func);
+const StaticModule* FindStaticModule(uint32_t image_base);
 
 }  // namespace rex::runtime

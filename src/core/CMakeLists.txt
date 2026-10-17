@@ -74,6 +74,11 @@ elseif(UNIX)
         system_posix.cpp
         threading_posix.cpp
     )
+    if(EMSCRIPTEN)
+        # WebAssembly reuses the POSIX sources (Emscripten's libc is POSIX-like)
+        # except for fibers, which can't use ucontext there.
+        target_sources(rexcore PRIVATE fiber_wasm.cpp)
+    endif()
 endif()
 
 # Xenos data-format layer (stateless; headers under include/rex/graphics/).
@@ -100,7 +105,7 @@ target_include_directories(rexcore PRIVATE
 
 if(APPLE)
     target_link_libraries(rexcore PRIVATE pthread)
-elseif(UNIX)
+elseif(UNIX AND NOT EMSCRIPTEN)
     target_link_libraries(rexcore PRIVATE pthread rt dl)
 endif()
 

@@ -139,6 +139,29 @@
             "displayName": "macOS ARM64",
             "description": "Multi-config build for macOS ARM64 using Clang",
             "inherits": "mac-arm64-base"
+        },
+        {
+            "name": "wasm64",
+            "displayName": "WebAssembly (wasm64)",
+            "description": "Multi-config build of the runtime for the browser with Emscripten (memory64, pthreads). Needs EMSDK set, e.g. by emsdk_env.",
+            "generator": "Ninja Multi-Config",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+            "cacheVariables": {
+                "EMSCRIPTEN_SYSTEM_PROCESSOR": "wasm64",
+                "CMAKE_C_FLAGS": "-sMEMORY64 -pthread -msimd128 -fwasm-exceptions",
+                "CMAKE_CXX_FLAGS": "-sMEMORY64 -pthread -msimd128 -fwasm-exceptions",
+                "CMAKE_EXE_LINKER_FLAGS": "-sMEMORY64 -pthread -msimd128 -fwasm-exceptions",
+                "REXGLUE_USE_VULKAN": "OFF",
+                "REXGLUE_ENABLE_TRACY": "OFF",
+                "REXGLUE_ENABLE_FIDELITYFX": "OFF",
+                "CMAKE_CXX_STANDARD": "23",
+                "CMAKE_CONFIGURATION_TYPES": "Debug;Release;RelWithDebInfo",
+                "CMAKE_CROSS_CONFIGS": "all",
+                "CMAKE_DEFAULT_BUILD_TYPE": "Debug",
+                "CMAKE_DEFAULT_CONFIGS": "all",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
+            }
         }
     ],
     "buildPresets": [
@@ -230,6 +253,21 @@
         {
             "name": "mac-arm64-relwithdebinfo",
             "configurePreset": "mac-arm64",
+            "configuration": "RelWithDebInfo"
+        },
+        {
+            "name": "wasm64-debug",
+            "configurePreset": "wasm64",
+            "configuration": "Debug"
+        },
+        {
+            "name": "wasm64-release",
+            "configurePreset": "wasm64",
+            "configuration": "Release"
+        },
+        {
+            "name": "wasm64-relwithdebinfo",
+            "configurePreset": "wasm64",
             "configuration": "RelWithDebInfo"
         }
     ],

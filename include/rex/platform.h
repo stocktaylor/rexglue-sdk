@@ -38,6 +38,10 @@
 #elif defined(__gnu_linux__)
 #define REX_PLATFORM_GNU_LINUX 1
 #define REX_PLATFORM_LINUX 1
+#elif defined(__EMSCRIPTEN__)
+// WebAssembly in the browser (docs/WASM.md). POSIX-like through Emscripten's
+// libc, but not Linux: no signals, page protection, fixed mappings or dlopen.
+#define REX_PLATFORM_WASM 1
 #else
 #error Unsupported target OS.
 #endif
@@ -58,6 +62,9 @@
 #endif
 #ifndef REX_PLATFORM_LINUX
 #define REX_PLATFORM_LINUX 0
+#endif
+#ifndef REX_PLATFORM_WASM
+#define REX_PLATFORM_WASM 0
 #endif
 
 #if defined(__clang__)
@@ -82,6 +89,10 @@
 #error Rex is not supported on 32-bit platforms.
 #elif defined(_M_PPC) || defined(__powerpc__)
 #define REX_ARCH_PPC 1
+#elif defined(__wasm64__)
+#define REX_ARCH_WASM 1
+#elif defined(__wasm32__)
+#error Rex needs wasm64 (memory64): the guest address space alone is 4 GB.
 #endif
 
 #if REX_PLATFORM_WIN32

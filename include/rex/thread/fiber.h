@@ -64,6 +64,10 @@ struct Fiber {
   bool is_thread_fiber_ = false;
 
   static void Trampoline();
+#elif REX_PLATFORM_WASM
+  // Only thread fibers so far: switching stacks needs JSPI or Asyncify
+  // (docs/WASM.md, phase 2).
+  bool is_thread_fiber_ = false;
 #endif
 };
 

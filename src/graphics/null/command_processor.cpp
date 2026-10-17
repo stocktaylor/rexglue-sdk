@@ -13,10 +13,9 @@
 
 #include <algorithm>
 
-#include <xxhash.h>
-
 #include <rex/graphics/graphics_system.h>
 #include <rex/graphics/null/graphics_system.h>
+#include <rex/hash.h>
 
 #include "wireframe_sampler.h"
 
@@ -60,8 +59,7 @@ Shader* NullCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t
 }
 
 bool NullCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
-                                     IndexBufferInfo* index_buffer_info,
-                                     bool major_mode_explicit) {
+                                     IndexBufferInfo* index_buffer_info, bool major_mode_explicit) {
   (void)major_mode_explicit;
   if (!sampler_ || !sampler_->capturing()) {
     return true;

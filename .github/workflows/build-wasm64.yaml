@@ -1,0 +1,55 @@
+name: Build rexglue-sdk wasm64
+
+# WebAssembly bring-up (docs/WASM.md): the runtime builds for wasm64 with
+# Emscripten and the smoke test runs under node. Nothing is published yet.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+env:
+  # Pin the toolchain: memory64 and pthread support still move between releases.
+  EMSDK_VERSION: "6.0.12"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Cache emsdk
+        uses: actions/cache@v4
+        with:
+          path: emsdk
+          key: emsdk-${{ env.EMSDK_VERSION }}-${{ runner.os }}
+
+      - name: Install Emscripten ${{ env.EMSDK_VERSION }}
+        run: |
+          if [ ! -d emsdk/.git ]; then
+            git clone --depth 1 https://github.com/emscripten-core/emsdk.git emsdk
+          fi
+          emsdk/emsdk install "$EMSDK_VERSION"
+          emsdk/emsdk activate "$EMSDK_VERSION"
+
+      - name: Configure
+        run: |
+          source emsdk/emsdk_env.sh
+          cmake --preset wasm64
+
+      - name: Build
+        run: |
+          source emsdk/emsdk_env.sh
+          cmake --build out/build/wasm64 --config Release --parallel
+
+      - name: Smoke test
+        run: |
+          source emsdk/emsdk_env.sh
+          node out/wasm64/Release/rexglue-wasm-smoke.js

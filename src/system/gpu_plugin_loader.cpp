@@ -45,6 +45,38 @@ std::string PluginFileName(std::string_view name) {
 #endif
 }
 
+struct StaticGpuPlugin {
+  std::string name;
+  GpuAbiVersionFn abi_version_fn;
+  GpuCreateFn create_fn;
+};
+
+// Filled during static initialization, so it must exist before main.
+std::vector<StaticGpuPlugin>& StaticPlugins() {
+  static std::vector<StaticGpuPlugin> plugins;
+  return plugins;
+}
+
+IGraphicsSystem* CreateGraphicsSystem(std::string_view name, GpuAbiVersionFn abi_version_fn,
+                                      GpuCreateFn create_fn, std::string_view backend) {
+  uint32_t plugin_abi = abi_version_fn();
+  if (plugin_abi != kGpuPluginAbiVersion) {
+    REXSYS_ERROR("GPU plugin '{}' has ABI version {}, host expects {}", name, plugin_abi,
+                 kGpuPluginAbiVersion);
+    return nullptr;
+  }
+  std::string backend_str(backend);
+  GpuCreateInfo info{};
+  info.struct_size = sizeof(GpuCreateInfo);
+  info.backend = backend_str.c_str();
+  IGraphicsSystem* graphics_system = create_fn(kGpuPluginAbiVersion, &info);
+  if (!graphics_system) {
+    REXSYS_ERROR("GPU plugin '{}' factory returned no graphics system (backend '{}')", name,
+                 backend_str);
+  }
+  return graphics_system;
+}
+
 // Plugins stay loaded for process lifetime: guest threads may still be in
 // plugin code pages at shutdown.
 std::vector<platform::DynamicLibrary>& LoadedPlugins() {
@@ -54,7 +86,21 @@ std::vector<platform::DynamicLibrary>& LoadedPlugins() {
 
 }  // namespace
 
+bool RegisterStaticGpuPlugin(std::string_view name, GpuAbiVersionFn abi_version_fn,
+                             GpuCreateFn create_fn) {
+  StaticPlugins().push_back({std::string(name), abi_version_fn, create_fn});
+  return true;
+}
+
 std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::string_view backend) {
+  for (const StaticGpuPlugin& plugin : StaticPlugins()) {
+    if (plugin.name == name) {
+      REXSYS_DEBUG("GPU plugin '{}' is linked in", name);
+      return std::unique_ptr<IGraphicsSystem>(
+          CreateGraphicsSystem(name, plugin.abi_version_fn, plugin.create_fn, backend));
+    }
+  }
+
   auto path = rex::filesystem::GetExecutableFolder() / PluginFileName(name);
   if (!std::filesystem::exists(path)) {
     REXSYS_ERROR(
@@ -78,22 +124,9 @@ std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::strin
     return nullptr;
   }
 
-  uint32_t plugin_abi = abi_version_fn();
-  if (plugin_abi != kGpuPluginAbiVersion) {
-    REXSYS_ERROR("GPU plugin '{}' has ABI version {}, host expects {}: {}", name, plugin_abi,
-                 kGpuPluginAbiVersion, path.string());
-    return nullptr;
-  }
-
-  std::string backend_str(backend);
-  GpuCreateInfo info{};
-  info.struct_size = sizeof(GpuCreateInfo);
-  info.backend = backend_str.c_str();
-
-  IGraphicsSystem* graphics_system = create_fn(kGpuPluginAbiVersion, &info);
+  IGraphicsSystem* graphics_system = CreateGraphicsSystem(name, abi_version_fn, create_fn, backend);
   if (!graphics_system) {
-    REXSYS_ERROR("GPU plugin '{}' factory returned no graphics system (backend '{}')", name,
-                 backend_str);
+    REXSYS_ERROR("GPU plugin '{}' could not be created: {}", name, path.string());
     return nullptr;
   }
 

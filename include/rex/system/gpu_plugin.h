@@ -53,4 +53,9 @@ using GpuCreateFn = IGraphicsSystem* (*)(uint32_t abi_version, const GpuCreateIn
 std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name,
                                                std::string_view backend = "any");
 
+// Plugins linked into the executable (WebAssembly has no dlopen) register their
+// entry points from a static initializer; LoadGpuPlugin checks these first.
+bool RegisterStaticGpuPlugin(std::string_view name, GpuAbiVersionFn abi_version_fn,
+                             GpuCreateFn create_fn);
+
 }  // namespace rex::system

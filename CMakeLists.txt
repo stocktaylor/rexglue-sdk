@@ -98,7 +98,7 @@ endif()
 
 # Enforce x64 architecture
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "ReXGlue only supports 64‑bit architectures (x86_64 or ARM64)")
+    message(FATAL_ERROR "ReXGlue only supports 64‑bit architectures (x86_64, ARM64, or wasm64 with -sMEMORY64)")
 endif()
 
 # Set C++23 standard
@@ -116,7 +116,21 @@ function(rex_config_postfix target)
         RELWITHDEBINFO_POSTFIX "${CMAKE_RELWITHDEBINFO_POSTFIX}")
 endfunction()
 
-if(NOT WIN32)
+# Library type for rexruntime and GPU plugins (overridden for WebAssembly).
+set(REX_SHARED_LIBRARY_TYPE SHARED)
+if(EMSCRIPTEN)
+    # WebAssembly (docs/WASM.md): every object in the link, third-party ones
+    # included, must agree on -sMEMORY64 -pthread -msimd128 -fwasm-exceptions.
+    # They come from CMAKE_<LANG>_FLAGS (the wasm64 preset), as compiler
+    # detection already needs -sMEMORY64.
+    foreach(flag -sMEMORY64 -pthread -msimd128 -fwasm-exceptions)
+        if(NOT " ${CMAKE_CXX_FLAGS} " MATCHES " ${flag} ")
+            message(FATAL_ERROR "WebAssembly builds need ${flag} in CMAKE_CXX_FLAGS (use the wasm64 preset)")
+        endif()
+    endforeach()
+    # No dlopen in the browser: the runtime and GPU plugins link statically.
+    set(REX_SHARED_LIBRARY_TYPE STATIC)
+elseif(NOT WIN32)
     # Use appropriate code model based on architecture
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64" AND NOT APPLE)
         # Large code model on Linux x86_64 for linking with very large recompiled executables (35MB+).
@@ -160,6 +174,9 @@ if(WIN32)
         message(FATAL_ERROR "Unsupported Windows architecture: ${REX_TARGET_PROCESSOR}")
     endif()
     add_compile_definitions(REX_PLATFORM_WINDOWS=1)
+elseif(EMSCRIPTEN)
+    set(REX_PLATFORM "wasm64")
+    add_compile_definitions(REX_PLATFORM_WASM=1)
 elseif(UNIX AND NOT APPLE)
     if(REX_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
         set(REX_PLATFORM "linux-amd64")
@@ -179,7 +196,7 @@ elseif(APPLE)
     endif()
     add_compile_definitions(REX_PLATFORM_MAC=1)
 else()
-    message(FATAL_ERROR "Unsupported platform. ReXGlue supports Windows, Linux, and macOS only.")
+    message(FATAL_ERROR "Unsupported platform. ReXGlue supports Windows, Linux, macOS and WebAssembly only.")
 endif()
 
 # Build config as compile definition (multi-config generators don't know config at configure time)
@@ -261,8 +278,14 @@ add_subdirectory(src/audio)
 add_subdirectory(src/graphics)
 add_subdirectory(src/system)
 add_subdirectory(src/kernel)
-add_subdirectory(src/codegen)
-add_subdirectory(src/rexglue)
+# The recompiler and its CLI run on the host only; a WebAssembly build is the
+# runtime alone (generate code with a native SDK build).
+if(NOT EMSCRIPTEN)
+    add_subdirectory(src/codegen)
+    add_subdirectory(src/rexglue)
+else()
+    add_subdirectory(tests/wasm)
+endif()
 
 # Add tests subdirectory if tests are enabled
 if(REXGLUE_BUILD_TESTS)
@@ -287,8 +310,12 @@ message(STATUS "  Tracy: ${REXGLUE_ENABLE_TRACY}")
 message(STATUS "  Perf Counters: ${REXGLUE_ENABLE_PERF_COUNTERS}")
 message(STATUS "===========================================")
 
-# SDK install/export rules (skipped when consumed as a subdirectory)
-if(PROJECT_IS_TOP_LEVEL)
+# SDK install/export rules (skipped when consumed as a subdirectory). A
+# WebAssembly SDK is not packaged yet: games build it in-tree via REXSDK_DIR.
+if(PROJECT_IS_TOP_LEVEL AND EMSCRIPTEN)
+    set(REXGLUE_SHARE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/ui")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rexglue_helpers.cmake)
+elseif(PROJECT_IS_TOP_LEVEL)
     include(cmake/rexglue_devenv.cmake)
     include(cmake/rexglue_install.cmake)
 else()

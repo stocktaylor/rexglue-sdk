@@ -38,8 +38,8 @@ class SoftwarePresenter final : public Presenter {
     RawImage& image_;
   };
 
-  static std::unique_ptr<SoftwarePresenter> Create(HostGpuLossCallback host_gpu_loss_callback =
-                                                       FatalErrorHostGpuLossCallback);
+  static std::unique_ptr<SoftwarePresenter> Create(
+      HostGpuLossCallback host_gpu_loss_callback = FatalErrorHostGpuLossCallback);
 
   Surface::TypeFlags GetSupportedSurfaceTypes() const override {
     return Surface::kTypeFlag_SdlWindow;

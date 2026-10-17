@@ -73,6 +73,9 @@ elseif(APPLE)
     set(REXUI_PLATFORM_SOURCES
         surface_mac.cpp
     )
+elseif(EMSCRIPTEN)
+    # Only the SDL window surface (SoftwarePresenter) exists in the browser.
+    set(REXUI_PLATFORM_SOURCES)
 else()
     set(REXUI_PLATFORM_SOURCES
         surface_gnulinux.cpp
@@ -147,7 +150,7 @@ if(REXGLUE_USE_VULKAN)
 endif()
 
 # Platform-specific dependencies
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(X11_XCB REQUIRED x11-xcb)
     # Required, not optional: vulkan/api.h pulls in <wayland-client.h> on every

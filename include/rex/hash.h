@@ -25,6 +25,13 @@
 // while the dispatch writes the result (multiple pointers without any
 // synchronization) to XXH_g_dispatch at the first call.
 
+#if defined(__wasm_simd128__)
+// xxHash's wasm vector path includes <arm_neon.h> (Emscripten's SIMDe shim)
+// inside its extern "C" block, where the shim's C++ templates can't compile.
+// Including it here first makes that inner include a no-op.
+#include <arm_neon.h>
+#endif
+
 #include <xxhash.h>
 
 namespace rex {

@@ -54,12 +54,24 @@ uint32_t ColorForRenderTarget(uint32_t edram_base) {
   float x = 1.0f - std::fabs(std::fmod(hue, 2.0f) - 1.0f);
   float r = 0, g = 0, b = 0;
   switch (int(hue)) {
-    case 0: r = 1, g = x; break;
-    case 1: r = x, g = 1; break;
-    case 2: g = 1, b = x; break;
-    case 3: g = x, b = 1; break;
-    case 4: r = x, b = 1; break;
-    default: r = 1, b = x; break;
+    case 0:
+      r = 1, g = x;
+      break;
+    case 1:
+      r = x, g = 1;
+      break;
+    case 2:
+      g = 1, b = x;
+      break;
+    case 3:
+      g = x, b = 1;
+      break;
+    case 4:
+      r = x, b = 1;
+      break;
+    default:
+      r = 1, b = x;
+      break;
   }
   auto channel = [](float v) { return uint8_t(80.0f + v * 175.0f); };
   return PackColor(channel(r), channel(g), channel(b));
@@ -142,10 +154,12 @@ void WireframeSampler::FinishCapture(ui::Presenter* presenter) {
 
   if (presenter) {
     presenter->RefreshGuestOutput(
-        width_, height_, width_, height_, [this](ui::Presenter::GuestOutputRefreshContext& context) {
-          auto& image = static_cast<ui::software::SoftwarePresenter::SoftwareGuestOutputRefreshContext&>(
-                            context)
-                            .image();
+        width_, height_, width_, height_,
+        [this](ui::Presenter::GuestOutputRefreshContext& context) {
+          auto& image =
+              static_cast<ui::software::SoftwarePresenter::SoftwareGuestOutputRefreshContext&>(
+                  context)
+                  .image();
           for (uint32_t y = 0; y < height_; ++y) {
             std::memcpy(image.data.data() + y * image.stride, pixels_.data() + size_t(y) * width_,
                         size_t(width_) * sizeof(uint32_t));
@@ -346,7 +360,8 @@ void WireframeSampler::OnDraw(const Shader& vertex_shader, xenos::PrimitiveType 
     } else {
       vertex_index = i;
     }
-    vertex_index = std::min(max_index, std::max(min_index, (vertex_index + index_offset) & 0xFFFFFF));
+    vertex_index =
+        std::min(max_index, std::max(min_index, (vertex_index + index_offset) & 0xFFFFFF));
     strip.push_back(TransformVertex(vertex_index));
   }
   flush_strip();

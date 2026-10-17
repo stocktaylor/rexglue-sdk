@@ -71,6 +71,13 @@ inline constexpr const char* kVulkanLoader = "libvulkan.1.dylib";
 inline constexpr const char* kRenderDoc = "librenderdoc.dylib";
 inline constexpr const char* kSpirvToolsSdkPath = "lib/libSPIRV-Tools-shared.dylib";
 
+#elif REX_PLATFORM_WASM
+
+// No dynamic libraries in the browser: everything is linked statically.
+inline constexpr const char* kVulkanLoader = "";
+inline constexpr const char* kRenderDoc = "";
+inline constexpr const char* kSpirvToolsSdkPath = "";
+
 #else
 #error No library names provided for the target platform.
 #endif

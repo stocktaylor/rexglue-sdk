@@ -9,7 +9,8 @@
 #include <rex/platform.h>
 #include <rex/thread.h>
 
-static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
+static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC || REX_PLATFORM_WASM,
+              "This file is POSIX-only");
 
 #include <signal.h>
 
@@ -34,6 +35,10 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#if REX_PLATFORM_WASM
+#include <emscripten/threading.h>
+#endif
 
 #include <rex/assert.h>
 #include <rex/chrono/chrono_steady_cast.h>
@@ -178,6 +183,11 @@ void EnableAffinityConfiguration() {}
 uint32_t current_thread_system_id() {
 #if defined(__APPLE__)
   return static_cast<uint32_t>(pthread_mach_thread_np(pthread_self()));
+#elif REX_PLATFORM_WASM
+  // No kernel thread ids in the browser: number threads as they first ask.
+  static std::atomic<uint32_t> next_id{1};
+  thread_local uint32_t id = next_id.fetch_add(1, std::memory_order_relaxed);
+  return id;
 #else
   return static_cast<uint32_t>(syscall(SYS_gettid));
 #endif
@@ -733,7 +743,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
     WaitStarted();
     std::unique_lock<std::mutex> lock(state_mutex_);
     if (state_ != State::kUninitialized && state_ != State::kFinished) {
-#if defined(__APPLE__)
+#if REX_PLATFORM_WASM
+      emscripten_set_thread_name(thread_, std::string(name).c_str());
+#elif defined(__APPLE__)
       // macOS pthread_setname_np() only names the calling thread.
       if (pthread_equal(thread_, pthread_self())) {
         pthread_setname_np(std::string(name).c_str());
@@ -766,9 +778,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
   uint64_t affinity_mask() {
     WaitStarted();
-#if defined(__APPLE__)
-    // macOS doesn't expose Linux-style pthread affinity masks; report every
-    // logical processor as available.
+#if defined(__APPLE__) || REX_PLATFORM_WASM
+    // macOS and browsers don't expose Linux-style pthread affinity masks;
+    // report every logical processor as available.
     auto cpu_count = std::min<uint32_t>(logical_processor_count(), 64);
     if (cpu_count == 64) {
       return std::numeric_limits<uint64_t>::max();
@@ -797,9 +809,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
   void set_affinity_mask(uint64_t mask) {
     WaitStarted();
-#if defined(__APPLE__)
-    // macOS doesn't expose Linux-style pthread affinity masks; keep this a
-    // no-op so higher layers can build and run.
+#if defined(__APPLE__) || REX_PLATFORM_WASM
+    // macOS and browsers don't expose Linux-style pthread affinity masks; keep
+    // this a no-op so higher layers can build and run.
     (void)mask;
 #else
     cpu_set_t cpu_set;
@@ -870,7 +882,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
       return;
     }
 
-#if defined(__APPLE__)
+#if REX_PLATFORM_WASM
+    // No signals between browser threads: the callback stays queued until the
+    // target's next alertable wait slice polls it.
+    int result = 0;
+#elif defined(__APPLE__)
     // macOS has no sigqueue/pthread_sigqueue; pthread_kill delivers the signal
     // without the sigval payload.
     int result = pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
@@ -1110,8 +1126,8 @@ std::chrono::milliseconds ComputeAlertableWaitTimeout(
   }
   // Round up: truncating a sub-millisecond remainder to 0 made the caller
   // poll without sleeping until the deadline passed.
-  auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
-      deadline - std::chrono::steady_clock::now());
+  auto remaining =
+      std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
   if (remaining <= std::chrono::milliseconds::zero()) {
     return std::chrono::milliseconds::zero();
   }
@@ -1513,7 +1529,9 @@ void Thread::Exit(int exit_code) {
 }
 
 void set_current_thread_name(const std::string_view name) {
-#if defined(__APPLE__)
+#if REX_PLATFORM_WASM
+  emscripten_set_thread_name(pthread_self(), std::string(name).c_str());
+#elif defined(__APPLE__)
   pthread_setname_np(std::string(name).c_str());
 #else
   pthread_setname_np(pthread_self(), std::string(name).c_str());

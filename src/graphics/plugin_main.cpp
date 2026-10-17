@@ -56,3 +56,10 @@ extern "C" REX_GPU_PLUGIN_EXPORT rex::system::IGraphicsSystem* rex_gpu_create(
   REXLOG_ERROR("rexgpu-xenos: requested backend '{}' is not compiled into this plugin", backend);
   return nullptr;
 }
+
+#if REX_PLATFORM_WASM
+// No dlopen in the browser: the host links this plugin in whole
+// (rexglue_configure_target), and it registers its entry points at startup.
+static const bool kRegisteredStaticGpuPlugin =
+    rex::system::RegisterStaticGpuPlugin("xenos", rex_gpu_abi_version, rex_gpu_create);
+#endif

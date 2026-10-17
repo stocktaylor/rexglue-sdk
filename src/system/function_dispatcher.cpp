@@ -32,7 +32,28 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
   return runtime ? runtime->function_dispatcher() : nullptr;
 }
 
+// Filled during static initialization, so it must exist before main.
+std::vector<StaticModule>& StaticModules() {
+  static std::vector<StaticModule> modules;
+  return modules;
+}
+
 }  // namespace
+
+bool RegisterStaticModule(const ::rex::PPCImageInfo* image_info,
+                          FunctionDispatcher::RegisterFn register_func) {
+  StaticModules().push_back({image_info, register_func});
+  return true;
+}
+
+const StaticModule* FindStaticModule(uint32_t image_base) {
+  for (const StaticModule& module : StaticModules()) {
+    if (module.image_info && module.image_info->image_base == image_base) {
+      return &module;
+    }
+  }
+  return nullptr;
+}
 
 static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
   REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",

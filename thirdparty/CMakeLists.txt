@@ -262,7 +262,7 @@ else()
     set(SDL_METAL OFF CACHE BOOL "" FORCE)
     # Linux picks X11 or Wayland at runtime, so the surface has to come from
     # whichever driver SDL chose. Windows presenters go straight from the HWND.
-    if(UNIX)
+    if(UNIX AND NOT EMSCRIPTEN)
         set(SDL_VULKAN ON CACHE BOOL "" FORCE)
     else()
         set(SDL_VULKAN OFF CACHE BOOL "" FORCE)
@@ -291,7 +291,7 @@ set(SDL_DUMMYVIDEO OFF CACHE BOOL "" FORCE)
 
 # Linux video and audio backends. Both video drivers are always built so the
 # one in use stays a runtime choice.
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
     set(SDL_X11               ON  CACHE BOOL "" FORCE)
     set(SDL_WAYLAND           ON  CACHE BOOL "" FORCE)
     set(SDL_ALSA              ON  CACHE BOOL "" FORCE)
@@ -428,6 +428,15 @@ configure_file(
   COPYONLY
 )
 
+# WebAssembly has no per-platform config.h inside the FFmpeg submodule: use the
+# overlay's plain-C one, which the overlay build dir puts ahead of FFmpeg's.
+if(EMSCRIPTEN)
+  configure_file(
+    "${FFMPEG_OVERLAY_SRC_DIR}/config_wasm64.h" "${FFMPEG_OVERLAY_BUILD_DIR}/config.h"
+    COPYONLY
+  )
+endif()
+
 # Common defines for both libraries
 set(FFMPEG_COMMON_DEFINES
     HAVE_AV_CONFIG_H
@@ -554,6 +563,9 @@ if(IS_ARM64)
     )
 endif()
 
+if(EMSCRIPTEN)
+  target_include_directories(libavutil BEFORE PRIVATE "${FFMPEG_OVERLAY_BUILD_DIR}")
+endif()
 target_include_directories(libavutil
     PUBLIC
         $<BUILD_INTERFACE:${FFMPEG_DIR}>

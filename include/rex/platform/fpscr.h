@@ -82,6 +82,29 @@ struct FPSCRPlatform {
   }
 };
 
+#elif defined(__wasm__)
+
+// WebAssembly has no floating-point control: rounding is always to nearest,
+// denormals are kept and nothing traps. The register is emulated per thread
+// with the x86 MXCSR layout so guest FPSCR reads see what was written, but
+// none of it changes how arithmetic behaves (docs/WASM.md).
+struct FPSCRPlatform {
+  static constexpr size_t RoundShift = 13;
+  static constexpr size_t RoundMaskVal = SIMDE_MM_ROUND_MASK;
+  static constexpr size_t FlushMask = SIMDE_MM_FLUSH_ZERO_MASK | _MM_DENORMALS_ZERO_MASK;
+  static constexpr u32 ExceptionMask = 0x3F << 7;
+  static constexpr size_t GuestToHost[] = {SIMDE_MM_ROUND_NEAREST, SIMDE_MM_ROUND_TOWARD_ZERO,
+                                           SIMDE_MM_ROUND_UP, SIMDE_MM_ROUND_DOWN};
+
+  static inline thread_local u32 csr_ = 0x1F80;  // MXCSR reset value
+
+  static inline u32 getcsr() noexcept { return csr_; }
+
+  static inline void setcsr(u32 csr) noexcept { csr_ = csr; }
+
+  static inline void InitHostExceptions(u32& csr) noexcept { csr |= ExceptionMask; }
+};
+
 #else
 #error "Missing implementation for FPSCR."
 #endif

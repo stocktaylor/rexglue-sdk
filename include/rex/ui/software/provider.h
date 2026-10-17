@@ -24,9 +24,8 @@ class SoftwareProvider final : public GraphicsProvider {
     return std::unique_ptr<SoftwareProvider>(new SoftwareProvider());
   }
 
-  std::unique_ptr<Presenter> CreatePresenter(
-      Presenter::HostGpuLossCallback host_gpu_loss_callback =
-          Presenter::FatalErrorHostGpuLossCallback) override;
+  std::unique_ptr<Presenter> CreatePresenter(Presenter::HostGpuLossCallback host_gpu_loss_callback =
+                                                 Presenter::FatalErrorHostGpuLossCallback) override;
 
   std::unique_ptr<ImmediateDrawer> CreateImmediateDrawer() override { return nullptr; }
 

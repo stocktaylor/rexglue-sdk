@@ -143,7 +143,8 @@ function(rexglue_configure_target target_name)
     endif()
 
     # Stage requested GPU emulation plugins next to the executable. Plugins
-    # are runtime-loaded (never linked), so TARGET_RUNTIME_DLLS misses them.
+    # are runtime-loaded (never linked), so TARGET_RUNTIME_DLLS misses them,
+    # except on WebAssembly, where they are linked in.
     foreach(_plugin IN LISTS ARG_GPU_PLUGINS)
         if(TARGET rexgpu-${_plugin})
             # In-tree build: depend on it so it gets built.
@@ -157,12 +158,20 @@ function(rexglue_configure_target target_name)
                 "rexglue_configure_target: unknown GPU plugin '${_plugin}' "
                 "(no target rexgpu-${_plugin} or rex::gpu-${_plugin})")
         endif()
-        add_custom_command(TARGET ${target_name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:${_plugin_target}>
-                $<TARGET_FILE_DIR:${target_name}>
-            VERBATIM
-        )
+        if(EMSCRIPTEN)
+            # WebAssembly has no dlopen: the plugin is a static library that
+            # registers itself from a static initializer (see plugin_main.cpp),
+            # so link all of it into the host.
+            target_link_libraries(${target_name} PRIVATE
+                "$<LINK_LIBRARY:WHOLE_ARCHIVE,${_plugin_target}>")
+        else()
+            add_custom_command(TARGET ${target_name} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:${_plugin_target}>
+                    $<TARGET_FILE_DIR:${target_name}>
+                VERBATIM
+            )
+        endif()
         unset(_plugin_target)
     endforeach()
 
@@ -194,6 +203,13 @@ function(rexglue_configure_module_target target_name)
         # which DEFER CALL otherwise treats as literal argument text.
         cmake_language(EVAL CODE
             "cmake_language(DEFER CALL add_dependencies ${ARG_HOST} ${target_name})")
+        if(EMSCRIPTEN)
+            # WebAssembly: the module is a static library (dll_targets.cmake)
+            # that registers itself from a static initializer, so the host must
+            # keep every object of it.
+            cmake_language(EVAL CODE
+                "cmake_language(DEFER CALL target_link_libraries ${ARG_HOST} PRIVATE \"$<LINK_LIBRARY:WHOLE_ARCHIVE,${target_name}>\")")
+        endif()
     elseif(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
         set_target_properties(${target_name} PROPERTIES
             LIBRARY_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}

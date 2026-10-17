@@ -30,7 +30,8 @@ std::unique_ptr<Presenter> SoftwareProvider::CreatePresenter(
 
 std::unique_ptr<SoftwarePresenter> SoftwarePresenter::Create(
     HostGpuLossCallback host_gpu_loss_callback) {
-  auto presenter = std::unique_ptr<SoftwarePresenter>(new SoftwarePresenter(host_gpu_loss_callback));
+  auto presenter =
+      std::unique_ptr<SoftwarePresenter>(new SoftwarePresenter(host_gpu_loss_callback));
   if (!presenter->InitializeCommonSurfaceIndependent()) {
     return nullptr;
   }
@@ -47,9 +48,12 @@ bool SoftwarePresenter::CaptureGuestOutput(RawImage& image_out) {
   return !image_out.data.empty();
 }
 
-Presenter::SurfacePaintConnectResult SoftwarePresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
-    Surface& new_surface, uint32_t new_surface_width, uint32_t new_surface_height,
-    bool was_paintable, bool& is_vsync_implicit_out) {
+Presenter::SurfacePaintConnectResult
+SoftwarePresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_surface,
+                                                                   uint32_t new_surface_width,
+                                                                   uint32_t new_surface_height,
+                                                                   bool was_paintable,
+                                                                   bool& is_vsync_implicit_out) {
   (void)new_surface_width;
   (void)new_surface_height;
   if (new_surface.GetType() != Surface::kTypeIndex_SdlWindow) {

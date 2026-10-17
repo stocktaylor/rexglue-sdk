@@ -101,13 +101,22 @@ struct CRRegister {
   }
 
   inline void setFromMask(simde__m128 mask, int imm) noexcept {
+#if defined(__wasm__)
+    // SIMDe makes simde__m128 and simde__m128i the same type (v128_t) on wasm,
+    // so the integer overload below can't exist. Codegen passes 0xFFFF only
+    // for byte masks (movemask_epi8) and 0xF for float masks.
+    int m = imm == 0xFFFF ? simde_mm_movemask_epi8(simde_mm_castps_si128(mask))
+                          : simde_mm_movemask_ps(mask);
+#else
     int m = simde_mm_movemask_ps(mask);
+#endif
     lt = m == imm;
     gt = 0;
     eq = m == 0;
     so = 0;
   }
 
+#if !defined(__wasm__)
   inline void setFromMask(simde__m128i mask, int imm) noexcept {
     int m = simde_mm_movemask_epi8(mask);
     lt = m == imm;
@@ -115,6 +124,7 @@ struct CRRegister {
     eq = m == 0;
     so = 0;
   }
+#endif
 };
 
 //=============================================================================

@@ -48,7 +48,7 @@ set(REXSYSTEM_SOURCES
     xex_module.cpp
 )
 
-add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
+add_library(rexruntime ${REX_SHARED_LIBRARY_TYPE} ${REXSYSTEM_SOURCES})
 add_library(rex::runtime ALIAS rexruntime)
 add_library(rex::system ALIAS rexruntime)
 add_library(rex::kernel ALIAS rexruntime)

@@ -26,6 +26,10 @@ uint64_t Clock::host_tick_frequency_platform() {
   mach_timebase_info_data_t info;
   mach_timebase_info(&info);
   return (uint64_t)((1000000000ull * (uint64_t)info.denom) / (uint64_t)info.numer);
+#elif REX_PLATFORM_WASM
+  // Ticks are the nanoseconds of host_tick_count_platform; the actual
+  // resolution (performance.now) is coarser, which clock_getres reports.
+  return 1000000000ull;
 #else
   timespec res;
   int error = clock_getres(CLOCK_MONOTONIC_RAW, &res);
@@ -46,7 +50,12 @@ uint64_t Clock::host_tick_count_platform() {
   return mach_absolute_time();
 #else
   timespec tp;
+#if REX_PLATFORM_WASM
+  // No CLOCK_MONOTONIC_RAW in Emscripten.
+  int error = clock_gettime(CLOCK_MONOTONIC, &tp);
+#else
   int error = clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
+#endif
   assert_zero(error);
 
   return tp.tv_nsec + tp.tv_sec * 1000000000ull;

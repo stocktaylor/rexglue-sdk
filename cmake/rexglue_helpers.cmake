@@ -101,6 +101,23 @@ function(rexglue_configure_target target_name)
 
     rexglue_apply_target_settings(${target_name})
 
+    if(EMSCRIPTEN)
+        # The app's main loop blocks, which the browser's (or node's) main
+        # thread must not: run main in a worker. Start workers up front (they
+        # load asynchronously) and give the main thread a real stack, as
+        # recompiled code has large frames.
+        target_link_options(${target_name} PRIVATE
+            -sPROXY_TO_PTHREAD
+            -sPTHREAD_POOL_SIZE=32
+            -sSTACK_SIZE=8MB
+            -sEXIT_RUNTIME
+        )
+        if(REXGLUE_WASM_NODE)
+            # Headless under node with the host filesystem (docs/WASM.md, phase 2).
+            target_link_options(${target_name} PRIVATE -sENVIRONMENT=node -sNODERAWFS)
+        endif()
+    endif()
+
     if(WIN32)
         # Stage runtime DLLs (rexruntime, TracyClient, etc.) next to the host
         # binary on every link. copy_if_different is a no-op when up to date.

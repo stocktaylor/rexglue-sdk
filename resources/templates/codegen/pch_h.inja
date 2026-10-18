@@ -124,7 +124,11 @@ extern PPCFuncMapping PPCFuncMappings[];
 // Memory Access
 //=============================================================================
 
-#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)
+#if REX_PLATFORM_WASM
+// No mapped views: every aliased guest range is redirected in software.
+#include <rex/memory/guest_layout.h>
+#define REX_PHYS_HOST_OFFSET(addr) ::rex::memory::GuestAliasHostOffset((u32)(addr))
+#elif REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)
 #define REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
 #else
 #define REX_PHYS_HOST_OFFSET(addr) 0u
@@ -237,6 +241,79 @@ extern PPCFuncMapping PPCFuncMappings[];
            (static_cast<u64>(_hi) << 32) | _lo;                                      \
          })                                                                          \
        : __builtin_bswap64(*(volatile u64*)(base + (addr) + REX_PHYS_HOST_OFFSET(addr))))
+
+#if REX_PLATFORM_WASM
+//=============================================================================
+// MMIO without faults (WebAssembly)
+//
+// Natively, MMIO the recompiler didn't recognise faults into MMIOHandler.
+// WebAssembly can't fault, so every scalar access in the MMIO range asks the
+// handler first; addresses no MMIO range claims (such as GPU writeback memory)
+// fall through to plain memory.
+//=============================================================================
+
+template <typename T>
+inline T rex_wasm_bswap(T value) {
+  if constexpr (sizeof(T) == 1) {
+    return value;
+  } else if constexpr (sizeof(T) == 2) {
+    return __builtin_bswap16(value);
+  } else if constexpr (sizeof(T) == 4) {
+    return __builtin_bswap32(value);
+  } else {
+    return __builtin_bswap64(value);
+  }
+}
+
+template <typename T>
+inline T rex_wasm_load(u8* base, u32 address) {
+  if (REX_IS_MMIO_ADDR(address)) [[unlikely]] {
+    auto* mmio = rex::runtime::MMIOHandler::global_handler();
+    u32 value, low;
+    if constexpr (sizeof(T) == 8) {
+      if (mmio && mmio->CheckLoad(address, &value) && mmio->CheckLoad(address + 4, &low)) {
+        return (static_cast<u64>(value) << 32) | low;
+      }
+    } else if (mmio && mmio->CheckLoad(address, &value)) {
+      return static_cast<T>(value);
+    }
+  }
+  return rex_wasm_bswap(*(volatile T*)(base + address + REX_PHYS_HOST_OFFSET(address)));
+}
+
+template <typename T>
+inline void rex_wasm_store(u8* base, u32 address, T value) {
+  if (REX_IS_MMIO_ADDR(address)) [[unlikely]] {
+    auto* mmio = rex::runtime::MMIOHandler::global_handler();
+    if constexpr (sizeof(T) == 8) {
+      if (mmio && mmio->CheckStore(address, static_cast<u32>(static_cast<u64>(value) >> 32)) &&
+          mmio->CheckStore(address + 4, static_cast<u32>(value))) {
+        return;
+      }
+    } else if (mmio && mmio->CheckStore(address, static_cast<u32>(value))) {
+      return;
+    }
+  }
+  *(volatile T*)(base + address + REX_PHYS_HOST_OFFSET(address)) = rex_wasm_bswap(value);
+}
+
+#undef REX_LOAD_U8
+#undef REX_LOAD_U16
+#undef REX_LOAD_U32
+#undef REX_LOAD_U64
+#undef REX_STORE_U8
+#undef REX_STORE_U16
+#undef REX_STORE_U32
+#undef REX_STORE_U64
+#define REX_LOAD_U8(x) rex_wasm_load<u8>(base, (u32)(x))
+#define REX_LOAD_U16(x) rex_wasm_load<u16>(base, (u32)(x))
+#define REX_LOAD_U32(x) rex_wasm_load<u32>(base, (u32)(x))
+#define REX_LOAD_U64(x) rex_wasm_load<u64>(base, (u32)(x))
+#define REX_STORE_U8(x, y) rex_wasm_store<u8>(base, (u32)(x), static_cast<u8>(y))
+#define REX_STORE_U16(x, y) rex_wasm_store<u16>(base, (u32)(x), static_cast<u16>(y))
+#define REX_STORE_U32(x, y) rex_wasm_store<u32>(base, (u32)(x), static_cast<u32>(y))
+#define REX_STORE_U64(x, y) rex_wasm_store<u64>(base, (u32)(x), static_cast<u64>(y))
+#endif  // REX_PLATFORM_WASM
 
 //=============================================================================
 // Function Dispatch

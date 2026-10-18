@@ -120,16 +120,17 @@ endfunction()
 set(REX_SHARED_LIBRARY_TYPE SHARED)
 if(EMSCRIPTEN)
     # WebAssembly (docs/WASM.md): every object in the link, third-party ones
-    # included, must agree on -sMEMORY64 -pthread -msimd128 -fwasm-exceptions.
-    # They come from CMAKE_<LANG>_FLAGS (the wasm64 preset), as compiler
-    # detection already needs -sMEMORY64.
-    foreach(flag -sMEMORY64 -pthread -msimd128 -fwasm-exceptions)
+    # included, must agree on these (wasm longjmp: generated code uses setjmp
+    # alongside native wasm exceptions). They come from CMAKE_<LANG>_FLAGS (the
+    # wasm64 preset), as compiler detection already needs -sMEMORY64.
+    foreach(flag -sMEMORY64 -pthread -msimd128 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm)
         if(NOT " ${CMAKE_CXX_FLAGS} " MATCHES " ${flag} ")
             message(FATAL_ERROR "WebAssembly builds need ${flag} in CMAKE_CXX_FLAGS (use the wasm64 preset)")
         endif()
     endforeach()
     # No dlopen in the browser: the runtime and GPU plugins link statically.
     set(REX_SHARED_LIBRARY_TYPE STATIC)
+    option(REXGLUE_WASM_NODE "Link WebAssembly apps to run under node with the host filesystem" ON)
 elseif(NOT WIN32)
     # Use appropriate code model based on architecture
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64" AND NOT APPLE)
@@ -285,6 +286,17 @@ if(NOT EMSCRIPTEN)
     add_subdirectory(src/rexglue)
 else()
     add_subdirectory(tests/wasm)
+    # Games still regenerate code during the build: point rex::rexglue at a
+    # native rexglue (on PATH, or REXGLUE_HOST_REXGLUE=<path>).
+    find_program(REXGLUE_HOST_REXGLUE NAMES rexglue
+        DOC "Native rexglue executable for codegen in WebAssembly builds")
+    if(REXGLUE_HOST_REXGLUE)
+        add_executable(rex::rexglue IMPORTED GLOBAL)
+        set_target_properties(rex::rexglue PROPERTIES IMPORTED_LOCATION "${REXGLUE_HOST_REXGLUE}")
+        message(STATUS "Host rexglue for codegen: ${REXGLUE_HOST_REXGLUE}")
+    else()
+        message(STATUS "No host rexglue found: set REXGLUE_HOST_REXGLUE to run codegen")
+    endif()
 endif()
 
 # Add tests subdirectory if tests are enabled

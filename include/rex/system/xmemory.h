@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include <rex/memory/guest_layout.h>
 #include <rex/memory/utils.h>
 #include <rex/ppc/func.h>  // PPCFunc type
 #include <rex/system/mmio_handler.h>
@@ -38,8 +39,12 @@ namespace rex::memory::detail {
 ///   - macOS arm64:    16KB granularity  -> offset
 ///   - macOS x86_64:    4KB granularity  -> no offset
 ///   - Linux (any):     4KB granularity  -> no offset (mmap handles it natively)
+/// WebAssembly has no mapped views at all: every aliased range is redirected
+/// here (see guest_layout.h).
 constexpr u32 PhysicalHostOffset([[maybe_unused]] u32 guest_addr) noexcept {
-#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && defined(__aarch64__))
+#if REX_PLATFORM_WASM
+  return GuestAliasHostOffset(guest_addr);
+#elif REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && defined(__aarch64__))
   return (guest_addr >= 0xE0000000u) ? 0x1000u : 0u;
 #else
   return 0u;
@@ -385,12 +390,17 @@ class Memory {
   // Note that the contents at the specified host address are big-endian.
   template <typename T = uint8_t*>
   inline T TranslateVirtual(uint32_t guest_address) const {
+#if REX_PLATFORM_WASM
+    return reinterpret_cast<T>(virtual_membase_ + guest_address +
+                               GuestAliasHostOffset(guest_address));
+#else
     uint8_t* host_address = virtual_membase_ + guest_address;
     const auto heap = LookupHeap(guest_address);
     if (heap) {
       host_address += heap->host_address_offset();
     }
     return reinterpret_cast<T>(host_address);
+#endif
   }
 
   // Base address of physical memory in the host address space.

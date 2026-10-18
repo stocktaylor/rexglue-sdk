@@ -162,6 +162,16 @@ bool Memory::Initialize() {
     return false;
   }
   mapping_base_ = views_.all_views[0];
+#elif REX_PLATFORM_WASM
+  // No views on WebAssembly: the mapping is one host block, and the aliased
+  // guest ranges are redirected in software (memory/guest_layout.h).
+  mapping_base_ = static_cast<uint8_t*>(rex::memory::MapFileView(
+      mapping_, nullptr, mapping_size, rex::memory::PageAccess::kReadWrite, 0));
+  if (!mapping_base_) {
+    REXSYS_ERROR("Unable to allocate the guest memory block.");
+    assert_always();
+    return false;
+  }
 #else
   // Attempt to create our views. This may fail at the first address
   // we pick, so try a few times.
@@ -196,15 +206,27 @@ bool Memory::Initialize() {
   heaps_.v90000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestXex, 0x90000000,
                               0x10000000, 4096);
 
-  // Prepare physical heaps.
+  // Prepare physical heaps. The views of physical memory reach it through
+  // their own mapping natively; on WebAssembly their base is shifted so that
+  // base + guest address lands in the physical part of the block.
+#if REX_PLATFORM_WASM
+  auto physical_view_membase = [this](uint32_t heap_base) {
+    return virtual_membase_ + memory::GuestAliasHostOffset(heap_base);
+  };
+#else
+  auto physical_view_membase = [this](uint32_t) { return virtual_membase_; };
+#endif
   heaps_.physical.Initialize(this, physical_membase_, memory::HeapType::kGuestPhysical, 0x00000000,
                              0x20000000, 4096);
-  heaps_.vA0000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestPhysical, 0xA0000000,
-                              0x20000000, 64 * 1024, &heaps_.physical);
-  heaps_.vC0000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestPhysical, 0xC0000000,
-                              0x20000000, 16 * 1024 * 1024, &heaps_.physical);
-  heaps_.vE0000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestPhysical, 0xE0000000,
-                              0x1FD00000, 4096, &heaps_.physical);
+  heaps_.vA0000000.Initialize(this, physical_view_membase(0xA0000000),
+                              memory::HeapType::kGuestPhysical, 0xA0000000, 0x20000000, 64 * 1024,
+                              &heaps_.physical);
+  heaps_.vC0000000.Initialize(this, physical_view_membase(0xC0000000),
+                              memory::HeapType::kGuestPhysical, 0xC0000000, 0x20000000,
+                              16 * 1024 * 1024, &heaps_.physical);
+  heaps_.vE0000000.Initialize(this, physical_view_membase(0xE0000000),
+                              memory::HeapType::kGuestPhysical, 0xE0000000, 0x1FD00000, 4096,
+                              &heaps_.physical);
 
   // Protect the first and last 64kb of memory.
   heaps_.v00000000.AllocFixed(0x00000000, 0x10000, 0x10000,
@@ -471,6 +493,13 @@ VirtualHeap* Memory::GetPhysicalHeap() {
 uint32_t Memory::HostToGuestVirtual(const void* host_address) const {
   size_t virtual_address =
       reinterpret_cast<size_t>(host_address) - reinterpret_cast<size_t>(virtual_membase_);
+#if REX_PLATFORM_WASM
+  // Physical memory has one host copy but three guest views (guest_layout.h);
+  // report the 0xA0000000 one.
+  if (virtual_address >= memory::kGuestPhysicalHostBase) {
+    return 0xA0000000u + uint32_t((virtual_address - memory::kGuestPhysicalHostBase) & 0x1FFFFFFF);
+  }
+#endif
   uint32_t vE0000000_host_offset = heaps_.vE0000000.host_address_offset();
   size_t vE0000000_host_base = size_t(heaps_.vE0000000.heap_base()) + vE0000000_host_offset;
   if (virtual_address >= vE0000000_host_base &&
@@ -849,10 +878,9 @@ bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uin
                  table_base + table_size);
     return false;
   }
-  if (!heap->AllocFixed(
-          table_base, table_size, 0x10000,
-          memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
-          memory::kMemoryProtectRead | memory::kMemoryProtectWrite)) {
+  if (!heap->AllocFixed(table_base, table_size, 0x10000,
+                        memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
+                        memory::kMemoryProtectRead | memory::kMemoryProtectWrite)) {
     REXSYS_ERROR("Failed to allocate function table at {:08X}", table_base);
     return false;
   }

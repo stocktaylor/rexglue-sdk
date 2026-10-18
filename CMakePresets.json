@@ -149,9 +149,9 @@
             "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
             "cacheVariables": {
                 "EMSCRIPTEN_SYSTEM_PROCESSOR": "wasm64",
-                "CMAKE_C_FLAGS": "-sMEMORY64 -pthread -msimd128 -fwasm-exceptions",
-                "CMAKE_CXX_FLAGS": "-sMEMORY64 -pthread -msimd128 -fwasm-exceptions",
-                "CMAKE_EXE_LINKER_FLAGS": "-sMEMORY64 -pthread -msimd128 -fwasm-exceptions",
+                "CMAKE_C_FLAGS": "-sMEMORY64 -pthread -msimd128 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm",
+                "CMAKE_CXX_FLAGS": "-sMEMORY64 -pthread -msimd128 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm",
+                "CMAKE_EXE_LINKER_FLAGS": "-sMEMORY64 -pthread -msimd128 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm",
                 "REXGLUE_USE_VULKAN": "OFF",
                 "REXGLUE_ENABLE_TRACY": "OFF",
                 "REXGLUE_ENABLE_FIDELITYFX": "OFF",

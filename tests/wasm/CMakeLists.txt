@@ -8,5 +8,5 @@ target_link_libraries(rexglue-wasm-smoke PRIVATE
 target_link_options(rexglue-wasm-smoke PRIVATE
     -sPROXY_TO_PTHREAD
     -sEXIT_RUNTIME
-    -sALLOW_MEMORY_GROWTH
+    --profiling-funcs  # keep function names in traps
 )

@@ -73,7 +73,11 @@
 #endif
 #endif
 
-#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)
+#if REX_PLATFORM_WASM
+// No mapped views: every aliased guest range is redirected in software.
+#include <rex/memory/guest_layout.h>
+#define REX_PHYS_HOST_OFFSET(addr) ::rex::memory::GuestAliasHostOffset((u32)(addr))
+#elif REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)
 #define REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
 #else
 #define REX_PHYS_HOST_OFFSET(addr) 0u

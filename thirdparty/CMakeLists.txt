@@ -284,10 +284,17 @@ set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
 set(SDL_OPENGL OFF CACHE BOOL "" FORCE)
 set(SDL_OPENGLES OFF CACHE BOOL "" FORCE)
 
-# Disable dummy drivers
+# Disable dummy drivers, except on WebAssembly: under node (no DOM, no audio
+# device) the runtime runs headless on them (video_driver=dummy,
+# SDL_AUDIO_DRIVER=dummy).
 set(SDL_DISKAUDIO OFF CACHE BOOL "" FORCE)
-set(SDL_DUMMYAUDIO OFF CACHE BOOL "" FORCE)
-set(SDL_DUMMYVIDEO OFF CACHE BOOL "" FORCE)
+if(EMSCRIPTEN)
+    set(SDL_DUMMYAUDIO ON CACHE BOOL "" FORCE)
+    set(SDL_DUMMYVIDEO ON CACHE BOOL "" FORCE)
+else()
+    set(SDL_DUMMYAUDIO OFF CACHE BOOL "" FORCE)
+    set(SDL_DUMMYVIDEO OFF CACHE BOOL "" FORCE)
+endif()
 
 # Linux video and audio backends. Both video drivers are always built so the
 # one in use stays a runtime choice.

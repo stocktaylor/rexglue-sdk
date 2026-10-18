@@ -76,8 +76,10 @@ elseif(UNIX)
     )
     if(EMSCRIPTEN)
         # WebAssembly reuses the POSIX sources (Emscripten's libc is POSIX-like)
-        # except for fibers, which can't use ucontext there.
-        target_sources(rexcore PRIVATE fiber_wasm.cpp)
+        # except where it has nothing to build on: fibers (no ucontext), page
+        # management (no mmap/mprotect) and exception handling (no faults).
+        target_sources(rexcore PRIVATE exception_handler_wasm.cpp fiber_wasm.cpp memory_wasm.cpp)
+        set_source_files_properties(memory_posix.cpp PROPERTIES HEADER_FILE_ONLY ON)
     endif()
 endif()
 

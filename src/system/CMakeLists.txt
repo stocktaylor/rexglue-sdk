@@ -55,6 +55,15 @@ add_library(rex::kernel ALIAS rexruntime)
 
 set_target_properties(rexruntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
 
+if(EMSCRIPTEN)
+    # The guest address space alone is a 4.6 GB block (memory/guest_layout.h):
+    # let memory grow to the most memory64 allows.
+    target_link_options(rexruntime INTERFACE
+        -sALLOW_MEMORY_GROWTH
+        -sMAXIMUM_MEMORY=16GB
+    )
+endif()
+
 rex_target_pch(rexruntime
     <mutex>
     <unordered_map>
@@ -71,6 +80,9 @@ rex_target_pch(rexruntime
 target_include_directories(rexruntime PUBLIC
     $<BUILD_INTERFACE:${REXGLUE_ROOT}/include>
     $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+    # Public SDK headers (rex/ui/style.h, ...) include <imgui.h>. An installed
+    # SDK has it in its include directory; an in-tree one (REXSDK_DIR) needs this.
+    $<BUILD_INTERFACE:${REXGLUE_ROOT}/thirdparty/imgui>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_include_directories(rexruntime PRIVATE

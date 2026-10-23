@@ -19,7 +19,7 @@
 #include <webgpu/webgpu.h>
 
 #include <rex/ui/presenter.h>
-#include <rex/ui/webgpu/device.h>
+#include <rex/ui/webgpu/device_thread.h>
 
 namespace rex::ui::webgpu {
 
@@ -31,15 +31,15 @@ namespace rex::ui::webgpu {
 // presenter's submission tracking: a refresh submitted before a paint is
 // complete before that paint reads it.
 //
-// Natively the UI thread paints while the GPU thread refreshes the guest
-// output, on a device created with ImplicitDeviceSynchronization. In the
-// browser all WebGPU calls go through the device thread (docs/WASM.md, phase
-// 5), which this presenter doesn't do yet.
+// Every WebGPU call runs on the device thread (WebGPUDeviceThread): painting,
+// including the UI drawers, while the UI thread waits for it, and guest output
+// refreshes, with the refresher called there too. In the browser the surface is
+// the page's canvas, which the device thread owns.
 class WebGPUPresenter : public Presenter {
  public:
   // The guest output image the refresher draws into: a 2D texture of the
   // frontbuffer size, usable as a render attachment, storage texture, copy
-  // destination and sampled texture.
+  // destination and sampled texture. The refresher runs on the device thread.
   class WebGPUGuestOutputRefreshContext final : public GuestOutputRefreshContext {
    public:
     WebGPUGuestOutputRefreshContext(bool& is_8bpc_out_ref, WGPUTexture texture,
@@ -76,19 +76,20 @@ class WebGPUPresenter : public Presenter {
   static constexpr WGPUTextureFormat kGuestOutputFormat = WGPUTextureFormat_RGBA8Unorm;
 
   static std::unique_ptr<WebGPUPresenter> Create(HostGpuLossCallback host_gpu_loss_callback,
-                                                 WebGPUDevice& device);
+                                                 WebGPUDeviceThread& device_thread);
 
   ~WebGPUPresenter() override;
 
-  WebGPUDevice& device() const { return device_; }
+  WebGPUDeviceThread& device_thread() const { return device_thread_; }
 
   Surface::TypeFlags GetSupportedSurfaceTypes() const override;
 
+  // Waits for the readback, so not from the device thread.
   bool CaptureGuestOutput(RawImage& image_out) override;
 
-  // Debugging: after the next paint, reads back what was presented (guest
-  // output and UI, before the window system composites it) and calls back on
-  // the painting thread. Native only, as it waits for the readback.
+  // Debugging: reads back what the next paint presents (guest output and UI,
+  // before the window system composites it) and calls back on the device
+  // thread once it's read.
   void CaptureNextPaint(std::function<void(RawImage&& image)> callback);
 
  protected:
@@ -111,19 +112,27 @@ class WebGPUPresenter : public Presenter {
     uint32_t height = 0;
   };
 
-  WebGPUPresenter(HostGpuLossCallback host_gpu_loss_callback, WebGPUDevice& device)
-      : Presenter(host_gpu_loss_callback), device_(device) {}
+  WebGPUPresenter(HostGpuLossCallback host_gpu_loss_callback, WebGPUDeviceThread& device_thread)
+      : Presenter(host_gpu_loss_callback), device_thread_(device_thread) {}
 
+  // The rest run on the device thread.
+  WebGPUDevice& device() const { return device_thread_.device(); }
   bool Initialize();
+  void Shutdown();
+  SurfacePaintConnectResult Connect(Surface& new_surface, uint32_t new_surface_width,
+                                    uint32_t new_surface_height, bool was_paintable);
+  void Disconnect();
+  PaintResult Paint(bool execute_ui_drawers);
   WGPUSurface CreateSurface(Surface& surface) const;
   bool ConfigureSurface(uint32_t width, uint32_t height);
   WGPURenderPipeline GetGuestOutputPipeline(WGPUTextureFormat format);
   static void ReleaseGuestOutputImage(GuestOutputImage& image);
-  // Copies texture (of the given format) to image_out, waiting. Native only.
-  bool ReadBackTexture(WGPUTexture texture, WGPUTextureFormat format, uint32_t width,
-                       uint32_t height, RawImage& image_out);
+  // Copies texture (of the given format) to an image and calls done with it, or
+  // with false on failure, once the copy is mapped.
+  void ReadBackTexture(WGPUTexture texture, WGPUTextureFormat format, uint32_t width,
+                       uint32_t height, std::function<void(bool ok, RawImage&& image)> done);
 
-  WebGPUDevice& device_;
+  WebGPUDeviceThread& device_thread_;
 
   WGPUShaderModule guest_output_shader_ = nullptr;
   WGPUBindGroupLayout guest_output_bind_group_layout_ = nullptr;
@@ -137,7 +146,7 @@ class WebGPUPresenter : public Presenter {
   // it takes a reference.
   std::array<GuestOutputImage, kGuestOutputMailboxSize> guest_output_images_;
 
-  // Painting connection, UI thread.
+  // Painting connection, device thread.
   const Surface* connected_surface_ = nullptr;
   WGPUSurface surface_ = nullptr;
   WGPUTextureFormat surface_format_ = WGPUTextureFormat_Undefined;

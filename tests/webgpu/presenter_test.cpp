@@ -144,7 +144,6 @@ class PresenterTestApp final : public WindowedApp {
 
   void RefreshLoop() {
     auto* presenter = static_cast<webgpu::WebGPUPresenter*>(presenter_.get());
-    WGPUQueue queue = provider_->device().queue();
     std::vector<uint8_t> pixels(size_t(kGuestWidth) * kGuestHeight * 4);
     for (uint32_t frame = 0; !stop_ && frame < 180; ++frame) {
       for (uint32_t y = 0; y < kGuestHeight; ++y) {
@@ -167,6 +166,8 @@ class PresenterTestApp final : public WindowedApp {
             layout.bytesPerRow = kGuestWidth * 4;
             layout.rowsPerImage = kGuestHeight;
             WGPUExtent3D extent = {kGuestWidth, kGuestHeight, 1};
+            // The refresher runs on the device thread.
+            WGPUQueue queue = provider_->device_thread().device().queue();
             wgpuQueueWriteTexture(queue, &destination, pixels.data(), pixels.size(), &layout,
                                   &extent);
             return true;

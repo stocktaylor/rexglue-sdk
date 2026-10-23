@@ -92,7 +92,14 @@ out/linux-amd64/Release/rexglue-webgpu-device
 out/linux-amd64/Release/rexglue-webgpu-presenter --video_driver=x11   # opens a window
 ```
 
-The first configure downloads Dawn (about 30 MB) into `out/deps`. For wasm, add `-DREXGLUE_USE_WEBGPU=ON` to the `wasm64` preset.
+The first configure downloads Dawn (about 30 MB) into `out/deps`. For wasm, add `-DREXGLUE_USE_WEBGPU=ON` to the `wasm64` preset; `rexglue-webgpu-device` then builds as a page to run with emrun, which serves it cross-origin isolated and prints its output:
+
+```bash
+emrun --browser=firefox --browser_args='--headless --no-remote --profile <dir>' \
+  --kill_exit out/wasm64/Release/rexglue-webgpu-device.html
+```
+
+Firefox on Linux still has WebGPU off by default (158): give the profile a `user.js` with `dom.webgpu.enabled`, `dom.webgpu.workers.enabled` and `gfx.webgpu.ignore-blocklist` set to true.
 
 ### Running under node
 
@@ -295,8 +302,9 @@ The largest item. For scale, the Vulkan backend ([src/graphics/vulkan](../src/gr
 - [x] Device creation ([ui/webgpu/device.h](../include/rex/ui/webgpu/device.h)): the adapter's full limits and the optional features it has; asynchronous for the browser's device thread, blocking natively. `rexglue-webgpu-device` ([tests/webgpu](../tests/webgpu)) runs a compute shader over a 512 MB storage buffer and reads it back: passes natively on Dawn/Vulkan (RX 9070 XT: 4 GB buffers and bindings, all seven optional features). For wasm64 it builds against emdawnwebgpu and, under node, gets as far as reporting that `navigator.gpu` is missing, so memory64 and the port work together.
 - [ ] `gpu_backend=webgpu`, once there is a backend to select.
 - [x] `src/ui/webgpu` natively: provider, presenter ([presenter.h](../include/rex/ui/webgpu/presenter.h)) and immediate drawer, so ImGui overlays draw too. The presenter stretches the guest output bilinearly into the letterboxed rectangle (the FidelityFX effects aren't ported) and gives refreshers the guest output texture, sampled, storage, render attachment and copy destination. WebGPU's reference counting and in-order queue replace the Vulkan presenter's submission tracking. Natively the UI thread paints while the GPU thread refreshes, on a device with Dawn's `ImplicitDeviceSynchronization`. `rexglue-webgpu-presenter` ([tests/webgpu](../tests/webgpu)) opens a window for a few seconds with a guest output refreshed from another thread under an ImGui window and saves a presented frame: correct on Dawn/Vulkan, letterboxing and overlay included. On Linux the prebuilt Dawn takes only Xlib windows (no Wayland, and no XCB), so on a Wayland desktop run with `--video_driver=x11` (XWayland), or build Dawn with `DAWN_USE_WAYLAND` and set `REXGLUE_DAWN_WAYLAND`.
-- [ ] The presenter in the browser: canvas surface, and its calls moved to the device thread.
-- [ ] Device thread and command batching, with the native build running it inline.
+- [ ] The presenter in the browser: its calls are on the device thread and it builds a canvas surface for the SDL window's canvas; untested until an app runs windowed in the browser (phase 6).
+- [x] Device thread ([device_thread.h](../include/rex/ui/webgpu/device_thread.h)): owns the device and makes every WebGPU call, releases included, through `Call` (run there and wait) or `Post` (queue and return); nothing on it waits for the GPU, asynchronous results come back on it through callbacks (`kDeviceThreadCallbackMode`) and other threads block for them if they must. In the browser it's a pthread living in its event loop, fed through an Emscripten proxying queue, and it takes over the canvas: from the calling thread if that owns it (with `PROXY_TO_PTHREAD`, main's pthread gets `#canvas` by default), else from the browser's main thread. Natively it's a thread running a task queue and Dawn's event processing, so the native build exercises the same threading (Dawn's implicit device synchronization is no longer requested). The presenter and immediate drawer go through it: the paint runs there, UI drawers included, while the UI thread waits; refreshers run there; immediate textures are created through it and released on it. `rexglue-webgpu-device` passes natively and in headless Firefox 158 on Linux (Vulkan, RX 9070 XT): device created on the thread, a 512 MB compute and readback whose map completes on the thread while main waits, and 30 frames presented to the canvas it owns.
+- [ ] Command batching for the GPU backend (recording off the device thread, replayed on it).
 - [ ] WGSL emitter: vertex and pixel shaders, then fetch (vertex and texture), then render target output, then memexport.
 - [ ] Internal shaders: offline SPIR-V to WGSL with Tint (the `tint` in the Dawn prebuilt), checked in, with the conversion scripted. Tried on all 97: 89 convert. The 8 that don't are the gamma ramp shaders (`apply_gamma_*`), which read the ramp through a texel buffer, which WebGPU lacks; port those by hand with a storage buffer. 87 of the 89 turn push constants into `var<immediate>`, which only Chrome has shipped (149+, 64 bytes); the script should rewrite those as uniform buffer bindings.
 - [ ] `src/graphics/webgpu`: shared memory, primitive processor, texture cache, render target cache (host render targets only), pipeline cache, command processor.

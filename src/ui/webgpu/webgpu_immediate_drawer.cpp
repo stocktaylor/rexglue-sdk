@@ -60,41 +60,52 @@ fn fs(in : Interpolants) -> @location(0) vec4f {
 
 class WebGPUImmediateDrawer::WebGPUImmediateTexture final : public ImmediateTexture {
  public:
-  WebGPUImmediateTexture(uint32_t width, uint32_t height, WGPUTexture texture, WGPUTextureView view,
-                         WGPUBindGroup bind_group)
-      : ImmediateTexture(width, height), texture_(texture), view_(view), bind_group_(bind_group) {}
+  WebGPUImmediateTexture(WebGPUDeviceThread& device_thread, uint32_t width, uint32_t height,
+                         WGPUTexture texture, WGPUTextureView view, WGPUBindGroup bind_group)
+      : ImmediateTexture(width, height),
+        device_thread_(device_thread),
+        texture_(texture),
+        view_(view),
+        bind_group_(bind_group) {}
   ~WebGPUImmediateTexture() override {
-    // Draws already recorded hold their own references.
-    wgpuBindGroupRelease(bind_group_);
-    wgpuTextureViewRelease(view_);
-    wgpuTextureRelease(texture_);
+    // Possibly from the UI thread. Draws already recorded hold their own
+    // references.
+    device_thread_.Post([texture = texture_, view = view_, bind_group = bind_group_] {
+      wgpuBindGroupRelease(bind_group);
+      wgpuTextureViewRelease(view);
+      wgpuTextureRelease(texture);
+    });
   }
 
   WGPUBindGroup bind_group() const { return bind_group_; }
 
  private:
+  WebGPUDeviceThread& device_thread_;
   WGPUTexture texture_;
   WGPUTextureView view_;
   WGPUBindGroup bind_group_;
 };
 
-std::unique_ptr<WebGPUImmediateDrawer> WebGPUImmediateDrawer::Create(WebGPUDevice& device) {
-  auto drawer = std::unique_ptr<WebGPUImmediateDrawer>(new WebGPUImmediateDrawer(device));
-  if (!drawer->Initialize()) {
+std::unique_ptr<WebGPUImmediateDrawer> WebGPUImmediateDrawer::Create(
+    WebGPUDeviceThread& device_thread) {
+  auto drawer = std::unique_ptr<WebGPUImmediateDrawer>(new WebGPUImmediateDrawer(device_thread));
+  bool initialized = false;
+  device_thread.Call([&] { initialized = drawer->Initialize(); });
+  if (!initialized) {
     return nullptr;
   }
   return drawer;
 }
 
 bool WebGPUImmediateDrawer::Initialize() {
-  WGPUDevice device = device_.device();
+  WGPUDevice dev = device().device();
 
   WGPUShaderSourceWGSL wgsl = WGPU_SHADER_SOURCE_WGSL_INIT;
   wgsl.code = View(kShader);
   WGPUShaderModuleDescriptor module_desc = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
   module_desc.nextInChain = &wgsl.chain;
   module_desc.label = View("Immediate drawer");
-  shader_ = wgpuDeviceCreateShaderModule(device, &module_desc);
+  shader_ = wgpuDeviceCreateShaderModule(dev, &module_desc);
 
   WGPUBindGroupLayoutEntry entries[2] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
                                          WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
@@ -108,21 +119,26 @@ bool WebGPUImmediateDrawer::Initialize() {
   WGPUBindGroupLayoutDescriptor layout_desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
   layout_desc.entryCount = 2;
   layout_desc.entries = entries;
-  texture_layout_ = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
+  texture_layout_ = wgpuDeviceCreateBindGroupLayout(dev, &layout_desc);
 
   WGPUPipelineLayoutDescriptor pipeline_layout_desc = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
   pipeline_layout_desc.bindGroupLayoutCount = 1;
   pipeline_layout_desc.bindGroupLayouts = &texture_layout_;
-  pipeline_layout_ = wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
+  pipeline_layout_ = wgpuDeviceCreatePipelineLayout(dev, &pipeline_layout_desc);
 
   // Untextured draws sample this.
   const uint8_t white[4] = {0xFF, 0xFF, 0xFF, 0xFF};
-  white_texture_ = CreateTexture(1, 1, ImmediateTextureFilter::kNearest, false, white);
+  white_texture_ =
+      CreateTextureOnDeviceThread(1, 1, ImmediateTextureFilter::kNearest, false, white);
 
   return shader_ && texture_layout_ && pipeline_layout_ && white_texture_;
 }
 
 WebGPUImmediateDrawer::~WebGPUImmediateDrawer() {
+  device_thread_.Call([this] { Shutdown(); });
+}
+
+void WebGPUImmediateDrawer::Shutdown() {
   white_texture_.reset();
   if (index_buffer_) {
     wgpuBufferRelease(index_buffer_);
@@ -163,7 +179,7 @@ WGPUSampler WebGPUImmediateDrawer::GetSampler(ImmediateTextureFilter filter, boo
         filter == ImmediateTextureFilter::kLinear ? WGPUFilterMode_Linear : WGPUFilterMode_Nearest;
     desc.magFilter = mode;
     desc.minFilter = mode;
-    sampler = wgpuDeviceCreateSampler(device_.device(), &desc);
+    sampler = wgpuDeviceCreateSampler(device().device(), &desc);
   }
   return sampler;
 }
@@ -171,12 +187,21 @@ WGPUSampler WebGPUImmediateDrawer::GetSampler(ImmediateTextureFilter filter, boo
 std::unique_ptr<ImmediateTexture> WebGPUImmediateDrawer::CreateTexture(
     uint32_t width, uint32_t height, ImmediateTextureFilter filter, bool is_repeated,
     const uint8_t* data) {
+  std::unique_ptr<ImmediateTexture> texture;
+  device_thread_.Call(
+      [&] { texture = CreateTextureOnDeviceThread(width, height, filter, is_repeated, data); });
+  return texture;
+}
+
+std::unique_ptr<ImmediateTexture> WebGPUImmediateDrawer::CreateTextureOnDeviceThread(
+    uint32_t width, uint32_t height, ImmediateTextureFilter filter, bool is_repeated,
+    const uint8_t* data) {
   WGPUTextureDescriptor texture_desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
   texture_desc.label = View("Immediate texture");
   texture_desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
   texture_desc.size = {width, height, 1};
   texture_desc.format = WGPUTextureFormat_RGBA8Unorm;
-  WGPUTexture texture = wgpuDeviceCreateTexture(device_.device(), &texture_desc);
+  WGPUTexture texture = wgpuDeviceCreateTexture(device().device(), &texture_desc);
   if (!texture) {
     return nullptr;
   }
@@ -187,7 +212,7 @@ std::unique_ptr<ImmediateTexture> WebGPUImmediateDrawer::CreateTexture(
     layout.bytesPerRow = width * 4;
     layout.rowsPerImage = height;
     WGPUExtent3D extent = {width, height, 1};
-    wgpuQueueWriteTexture(device_.queue(), &destination, data, size_t(width) * height * 4, &layout,
+    wgpuQueueWriteTexture(device().queue(), &destination, data, size_t(width) * height * 4, &layout,
                           &extent);
   }
   WGPUTextureView view = wgpuTextureCreateView(texture, nullptr);
@@ -200,8 +225,9 @@ std::unique_ptr<ImmediateTexture> WebGPUImmediateDrawer::CreateTexture(
   group_desc.layout = texture_layout_;
   group_desc.entryCount = 2;
   group_desc.entries = entries;
-  WGPUBindGroup bind_group = wgpuDeviceCreateBindGroup(device_.device(), &group_desc);
-  return std::make_unique<WebGPUImmediateTexture>(width, height, texture, view, bind_group);
+  WGPUBindGroup bind_group = wgpuDeviceCreateBindGroup(device().device(), &group_desc);
+  return std::make_unique<WebGPUImmediateTexture>(device_thread_, width, height, texture, view,
+                                                  bind_group);
 }
 
 WGPURenderPipeline WebGPUImmediateDrawer::GetPipeline(ImmediatePrimitiveType primitive_type,
@@ -261,7 +287,7 @@ WGPURenderPipeline WebGPUImmediateDrawer::GetPipeline(ImmediatePrimitiveType pri
   desc.primitive.topology =
       lines ? WGPUPrimitiveTopology_LineList : WGPUPrimitiveTopology_TriangleList;
   desc.fragment = &fragment;
-  pipeline = wgpuDeviceCreateRenderPipeline(device_.device(), &desc);
+  pipeline = wgpuDeviceCreateRenderPipeline(device().device(), &desc);
   return pipeline;
 }
 
@@ -278,17 +304,17 @@ uint64_t WebGPUImmediateDrawer::Upload(WGPUBuffer& buffer, uint64_t& capacity, u
     WGPUBufferDescriptor desc = WGPU_BUFFER_DESCRIPTOR_INIT;
     desc.size = capacity;
     desc.usage = usage | WGPUBufferUsage_CopyDst;
-    buffer = wgpuDeviceCreateBuffer(device_.device(), &desc);
+    buffer = wgpuDeviceCreateBuffer(device().device(), &desc);
     used = 0;
   }
   uint64_t offset = used;
   if (padded == size) {
-    wgpuQueueWriteBuffer(device_.queue(), buffer, offset, data, size);
+    wgpuQueueWriteBuffer(device().queue(), buffer, offset, data, size);
   } else {
     // writeBuffer sizes must be multiples of 4.
     std::vector<uint8_t> staging(padded, 0);
     std::memcpy(staging.data(), data, size);
-    wgpuQueueWriteBuffer(device_.queue(), buffer, offset, staging.data(), padded);
+    wgpuQueueWriteBuffer(device().queue(), buffer, offset, staging.data(), padded);
   }
   used += padded;
   return offset;
@@ -296,6 +322,7 @@ uint64_t WebGPUImmediateDrawer::Upload(WGPUBuffer& buffer, uint64_t& capacity, u
 
 void WebGPUImmediateDrawer::Begin(UIDrawContext& ui_draw_context, float coordinate_space_width,
                                   float coordinate_space_height) {
+  assert_true(device_thread_.IsCurrentThread());
   ImmediateDrawer::Begin(ui_draw_context, coordinate_space_width, coordinate_space_height);
   auto& webgpu_context = static_cast<WebGPUPresenter::WebGPUUIDrawContext&>(ui_draw_context);
   if (webgpu_context.pass() != pass_) {

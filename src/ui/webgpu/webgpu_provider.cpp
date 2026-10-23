@@ -16,30 +16,21 @@
 
 namespace rex::ui::webgpu {
 
-#if !defined(__EMSCRIPTEN__)
-std::unique_ptr<WebGPUProvider> WebGPUProvider::Create() {
-  std::unique_ptr<WebGPUDevice> device = WebGPUDevice::Create();
-  if (!device) {
+std::unique_ptr<WebGPUProvider> WebGPUProvider::Create(const std::string& canvas_selector) {
+  std::unique_ptr<WebGPUDeviceThread> device_thread = WebGPUDeviceThread::Start(canvas_selector);
+  if (!device_thread) {
     return nullptr;
   }
-  return Create(std::move(device));
-}
-#endif
-
-std::unique_ptr<WebGPUProvider> WebGPUProvider::Create(std::unique_ptr<WebGPUDevice> device) {
-  if (!device) {
-    return nullptr;
-  }
-  return std::unique_ptr<WebGPUProvider>(new WebGPUProvider(std::move(device)));
+  return std::unique_ptr<WebGPUProvider>(new WebGPUProvider(std::move(device_thread)));
 }
 
 std::unique_ptr<Presenter> WebGPUProvider::CreatePresenter(
     Presenter::HostGpuLossCallback host_gpu_loss_callback) {
-  return WebGPUPresenter::Create(host_gpu_loss_callback, *device_);
+  return WebGPUPresenter::Create(host_gpu_loss_callback, *device_thread_);
 }
 
 std::unique_ptr<ImmediateDrawer> WebGPUProvider::CreateImmediateDrawer() {
-  return WebGPUImmediateDrawer::Create(*device_);
+  return WebGPUImmediateDrawer::Create(*device_thread_);
 }
 
 }  // namespace rex::ui::webgpu

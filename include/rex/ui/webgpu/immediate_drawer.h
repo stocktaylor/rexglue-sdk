@@ -17,18 +17,20 @@
 #include <webgpu/webgpu.h>
 
 #include <rex/ui/immediate_drawer.h>
-#include <rex/ui/webgpu/device.h>
+#include <rex/ui/webgpu/device_thread.h>
 
 namespace rex::ui::webgpu {
 
-// Draws into the presenter's render pass (WebGPUPresenter::WebGPUUIDrawContext).
+// Draws into the presenter's render pass (WebGPUPresenter::WebGPUUIDrawContext),
+// on the device thread, where the presenter runs the UI drawers. Textures are
+// created through the device thread from any thread and released on it.
 // Vertices are transformed to clip space on the CPU while uploading, so there
 // are no per-Begin uniforms; vertex and index data for a frame go into growing
 // buffers through the queue, whose writes WebGPU orders before the paint
 // submission that reads them.
 class WebGPUImmediateDrawer : public ImmediateDrawer {
  public:
-  static std::unique_ptr<WebGPUImmediateDrawer> Create(WebGPUDevice& device);
+  static std::unique_ptr<WebGPUImmediateDrawer> Create(WebGPUDeviceThread& device_thread);
   ~WebGPUImmediateDrawer() override;
 
   std::unique_ptr<ImmediateTexture> CreateTexture(uint32_t width, uint32_t height,
@@ -45,15 +47,23 @@ class WebGPUImmediateDrawer : public ImmediateDrawer {
  private:
   class WebGPUImmediateTexture;
 
-  explicit WebGPUImmediateDrawer(WebGPUDevice& device) : device_(device) {}
+  explicit WebGPUImmediateDrawer(WebGPUDeviceThread& device_thread)
+      : device_thread_(device_thread) {}
+  // These run on the device thread.
+  WebGPUDevice& device() const { return device_thread_.device(); }
   bool Initialize();
+  void Shutdown();
+  std::unique_ptr<ImmediateTexture> CreateTextureOnDeviceThread(uint32_t width, uint32_t height,
+                                                                ImmediateTextureFilter filter,
+                                                                bool is_repeated,
+                                                                const uint8_t* data);
   WGPUSampler GetSampler(ImmediateTextureFilter filter, bool is_repeated);
   WGPURenderPipeline GetPipeline(ImmediatePrimitiveType primitive_type, WGPUTextureFormat format);
   // Appends size bytes (padded to 4) to a growing per-frame buffer.
   uint64_t Upload(WGPUBuffer& buffer, uint64_t& capacity, uint64_t& used, WGPUBufferUsage usage,
                   const void* data, uint64_t size);
 
-  WebGPUDevice& device_;
+  WebGPUDeviceThread& device_thread_;
 
   WGPUShaderModule shader_ = nullptr;
   WGPUBindGroupLayout texture_layout_ = nullptr;

@@ -12,21 +12,21 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include <rex/ui/graphics_provider.h>
-#include <rex/ui/webgpu/device.h>
+#include <rex/ui/webgpu/device_thread.h>
 
 namespace rex::ui::webgpu {
 
 class WebGPUProvider : public GraphicsProvider {
  public:
-#if !defined(__EMSCRIPTEN__)
-  // Creates the device, waiting for it. Native only.
-  static std::unique_ptr<WebGPUProvider> Create();
-#endif
-  static std::unique_ptr<WebGPUProvider> Create(std::unique_ptr<WebGPUDevice> device);
+  // Starts the device thread and creates the device on it, waiting for both.
+  // In the browser the thread takes over the canvas named by canvas_selector,
+  // the one the SDL window is on (Emscripten's default is "#canvas").
+  static std::unique_ptr<WebGPUProvider> Create(const std::string& canvas_selector = "#canvas");
 
-  WebGPUDevice& device() const { return *device_; }
+  WebGPUDeviceThread& device_thread() const { return *device_thread_; }
 
   std::unique_ptr<Presenter> CreatePresenter(Presenter::HostGpuLossCallback host_gpu_loss_callback =
                                                  Presenter::FatalErrorHostGpuLossCallback) override;
@@ -34,9 +34,10 @@ class WebGPUProvider : public GraphicsProvider {
   std::unique_ptr<ImmediateDrawer> CreateImmediateDrawer() override;
 
  private:
-  explicit WebGPUProvider(std::unique_ptr<WebGPUDevice> device) : device_(std::move(device)) {}
+  explicit WebGPUProvider(std::unique_ptr<WebGPUDeviceThread> device_thread)
+      : device_thread_(std::move(device_thread)) {}
 
-  std::unique_ptr<WebGPUDevice> device_;
+  std::unique_ptr<WebGPUDeviceThread> device_thread_;
 };
 
 }  // namespace rex::ui::webgpu

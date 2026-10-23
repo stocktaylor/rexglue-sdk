@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <future>
 
 #include <rex/logging.h>
 #include <rex/platform.h>
@@ -23,6 +24,9 @@
 #include <rex/ui/surface_win.h>
 #elif REX_PLATFORM_MAC
 #include <rex/ui/surface_mac.h>
+#endif
+#if defined(__EMSCRIPTEN__)
+#include <rex/ui/surface_sdl.h>
 #endif
 
 namespace rex::ui::webgpu {
@@ -67,24 +71,29 @@ bool IsBgra(WGPUTextureFormat format) {
 }  // namespace
 
 std::unique_ptr<WebGPUPresenter> WebGPUPresenter::Create(HostGpuLossCallback host_gpu_loss_callback,
-                                                         WebGPUDevice& device) {
+                                                         WebGPUDeviceThread& device_thread) {
   auto presenter =
-      std::unique_ptr<WebGPUPresenter>(new WebGPUPresenter(host_gpu_loss_callback, device));
-  if (!presenter->InitializeCommonSurfaceIndependent() || !presenter->Initialize()) {
+      std::unique_ptr<WebGPUPresenter>(new WebGPUPresenter(host_gpu_loss_callback, device_thread));
+  if (!presenter->InitializeCommonSurfaceIndependent()) {
+    return nullptr;
+  }
+  bool initialized = false;
+  device_thread.Call([&] { initialized = presenter->Initialize(); });
+  if (!initialized) {
     return nullptr;
   }
   return presenter;
 }
 
 bool WebGPUPresenter::Initialize() {
-  WGPUDevice device = device_.device();
+  WGPUDevice dev = device().device();
 
   WGPUShaderSourceWGSL wgsl = WGPU_SHADER_SOURCE_WGSL_INIT;
   wgsl.code = View(kGuestOutputShader);
   WGPUShaderModuleDescriptor module_desc = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
   module_desc.nextInChain = &wgsl.chain;
   module_desc.label = View("Guest output");
-  guest_output_shader_ = wgpuDeviceCreateShaderModule(device, &module_desc);
+  guest_output_shader_ = wgpuDeviceCreateShaderModule(dev, &module_desc);
 
   WGPUBindGroupLayoutEntry entries[2] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
                                          WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
@@ -98,25 +107,28 @@ bool WebGPUPresenter::Initialize() {
   WGPUBindGroupLayoutDescriptor layout_desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
   layout_desc.entryCount = 2;
   layout_desc.entries = entries;
-  guest_output_bind_group_layout_ = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
+  guest_output_bind_group_layout_ = wgpuDeviceCreateBindGroupLayout(dev, &layout_desc);
 
   WGPUPipelineLayoutDescriptor pipeline_layout_desc = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
   pipeline_layout_desc.bindGroupLayoutCount = 1;
   pipeline_layout_desc.bindGroupLayouts = &guest_output_bind_group_layout_;
-  guest_output_pipeline_layout_ = wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
+  guest_output_pipeline_layout_ = wgpuDeviceCreatePipelineLayout(dev, &pipeline_layout_desc);
 
   WGPUSamplerDescriptor sampler_desc = WGPU_SAMPLER_DESCRIPTOR_INIT;
   sampler_desc.magFilter = WGPUFilterMode_Linear;
   sampler_desc.minFilter = WGPUFilterMode_Linear;
-  guest_output_sampler_ = wgpuDeviceCreateSampler(device, &sampler_desc);
+  guest_output_sampler_ = wgpuDeviceCreateSampler(dev, &sampler_desc);
 
   return guest_output_shader_ && guest_output_bind_group_layout_ && guest_output_pipeline_layout_ &&
          guest_output_sampler_;
 }
 
 WebGPUPresenter::~WebGPUPresenter() {
-  // WebGPU keeps the surface's last presented texture alive internally.
-  DisconnectPaintingFromSurfaceFromUIThreadImpl();
+  device_thread_.Call([this] { Shutdown(); });
+}
+
+void WebGPUPresenter::Shutdown() {
+  Disconnect();
   for (GuestOutputImage& image : guest_output_images_) {
     ReleaseGuestOutputImage(image);
   }
@@ -162,8 +174,10 @@ Surface::TypeFlags WebGPUPresenter::GetSupportedSurfaceTypes() const {
   return Surface::kTypeFlag_Win32Hwnd;
 #elif REX_PLATFORM_MAC
   return Surface::kTypeFlag_CAMetalLayer;
+#elif defined(__EMSCRIPTEN__)
+  // The SDL window is on the page's canvas, which the device thread owns.
+  return Surface::kTypeFlag_SdlWindow;
 #else
-  // The browser canvas comes with the device thread.
   return 0;
 #endif
 }
@@ -178,7 +192,7 @@ WGPUSurface WebGPUPresenter::CreateSurface(Surface& surface) const {
       source.display = wayland.display();
       source.surface = wayland.surface();
       descriptor.nextInChain = &source.chain;
-      return wgpuInstanceCreateSurface(device_.instance(), &descriptor);
+      return wgpuInstanceCreateSurface(device().instance(), &descriptor);
     }
     case Surface::kTypeIndex_XcbWindow: {
       // Dawn takes X11 windows through Xlib, not XCB.
@@ -190,7 +204,7 @@ WGPUSurface WebGPUPresenter::CreateSurface(Surface& surface) const {
       source.display = xcb.xlib_display();
       source.window = xcb.window();
       descriptor.nextInChain = &source.chain;
-      return wgpuInstanceCreateSurface(device_.instance(), &descriptor);
+      return wgpuInstanceCreateSurface(device().instance(), &descriptor);
     }
 #elif REX_PLATFORM_WIN32
     case Surface::kTypeIndex_Win32Hwnd: {
@@ -199,7 +213,7 @@ WGPUSurface WebGPUPresenter::CreateSurface(Surface& surface) const {
       source.hinstance = win32.hinstance();
       source.hwnd = win32.hwnd();
       descriptor.nextInChain = &source.chain;
-      return wgpuInstanceCreateSurface(device_.instance(), &descriptor);
+      return wgpuInstanceCreateSurface(device().instance(), &descriptor);
     }
 #elif REX_PLATFORM_MAC
     case Surface::kTypeIndex_CAMetalLayer: {
@@ -207,7 +221,19 @@ WGPUSurface WebGPUPresenter::CreateSurface(Surface& surface) const {
       WGPUSurfaceSourceMetalLayer source = WGPU_SURFACE_SOURCE_METAL_LAYER_INIT;
       source.layer = const_cast<void*>(metal.layer());
       descriptor.nextInChain = &source.chain;
-      return wgpuInstanceCreateSurface(device_.instance(), &descriptor);
+      return wgpuInstanceCreateSurface(device().instance(), &descriptor);
+    }
+#endif
+#if defined(__EMSCRIPTEN__)
+    case Surface::kTypeIndex_SdlWindow: {
+      if (device_thread_.canvas_selector().empty()) {
+        return nullptr;
+      }
+      WGPUEmscriptenSurfaceSourceCanvasHTMLSelector source =
+          WGPU_EMSCRIPTEN_SURFACE_SOURCE_CANVAS_HTML_SELECTOR_INIT;
+      source.selector = {device_thread_.canvas_selector().c_str(), WGPU_STRLEN};
+      descriptor.nextInChain = &source.chain;
+      return wgpuInstanceCreateSurface(device().instance(), &descriptor);
     }
 #endif
     default:
@@ -217,7 +243,7 @@ WGPUSurface WebGPUPresenter::CreateSurface(Surface& surface) const {
 
 bool WebGPUPresenter::ConfigureSurface(uint32_t width, uint32_t height) {
   WGPUSurfaceCapabilities capabilities = WGPU_SURFACE_CAPABILITIES_INIT;
-  if (wgpuSurfaceGetCapabilities(surface_, device_.adapter(), &capabilities) !=
+  if (wgpuSurfaceGetCapabilities(surface_, device().adapter(), &capabilities) !=
       WGPUStatus_Success) {
     return false;
   }
@@ -238,7 +264,7 @@ bool WebGPUPresenter::ConfigureSurface(uint32_t width, uint32_t height) {
   }
 
   WGPUSurfaceConfiguration config = WGPU_SURFACE_CONFIGURATION_INIT;
-  config.device = device_.device();
+  config.device = device().device();
   config.format = surface_format_;
   config.usage = WGPUTextureUsage_RenderAttachment |
                  (surface_copy_src_ ? WGPUTextureUsage_CopySrc : WGPUTextureUsage_None);
@@ -258,13 +284,24 @@ WebGPUPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
                                                                  uint32_t new_surface_height,
                                                                  bool was_paintable,
                                                                  bool& is_vsync_implicit_out) {
+  // FIFO: presenting waits for vertical blank.
+  is_vsync_implicit_out = true;
+  SurfacePaintConnectResult result;
+  device_thread_.Call(
+      [&] { result = Connect(new_surface, new_surface_width, new_surface_height, was_paintable); });
+  return result;
+}
+
+Presenter::SurfacePaintConnectResult WebGPUPresenter::Connect(Surface& new_surface,
+                                                              uint32_t new_surface_width,
+                                                              uint32_t new_surface_height,
+                                                              bool was_paintable) {
   if (was_paintable && surface_ && connected_surface_ == &new_surface &&
       surface_width_ == new_surface_width && surface_height_ == new_surface_height) {
-    is_vsync_implicit_out = true;
     return SurfacePaintConnectResult::kSuccessUnchanged;
   }
   if (connected_surface_ != &new_surface || !surface_) {
-    DisconnectPaintingFromSurfaceFromUIThreadImpl();
+    Disconnect();
     surface_ = CreateSurface(new_surface);
     if (!surface_) {
       return SurfacePaintConnectResult::kFailureSurfaceUnusable;
@@ -272,15 +309,17 @@ WebGPUPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
     connected_surface_ = &new_surface;
   }
   if (!ConfigureSurface(new_surface_width, new_surface_height)) {
-    DisconnectPaintingFromSurfaceFromUIThreadImpl();
+    Disconnect();
     return SurfacePaintConnectResult::kFailureSurfaceUnusable;
   }
-  // FIFO: presenting waits for vertical blank.
-  is_vsync_implicit_out = true;
   return SurfacePaintConnectResult::kSuccess;
 }
 
 void WebGPUPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
+  device_thread_.Call([this] { Disconnect(); });
+}
+
+void WebGPUPresenter::Disconnect() {
   if (surface_) {
     wgpuSurfaceUnconfigure(surface_);
     wgpuSurfaceRelease(surface_);
@@ -294,38 +333,42 @@ void WebGPUPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
 bool WebGPUPresenter::RefreshGuestOutputImpl(
     uint32_t mailbox_index, uint32_t frontbuffer_width, uint32_t frontbuffer_height,
     std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref) {
-  GuestOutputImage& image = guest_output_images_[mailbox_index];
-  if (!image.texture || image.width != frontbuffer_width || image.height != frontbuffer_height) {
-    // Any paint still using the old texture holds its own reference.
-    ReleaseGuestOutputImage(image);
-    WGPUTextureDescriptor texture_desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
-    texture_desc.label = View("Guest output");
-    texture_desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_RenderAttachment |
-                         WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopyDst |
-                         WGPUTextureUsage_CopySrc;
-    texture_desc.size = {frontbuffer_width, frontbuffer_height, 1};
-    texture_desc.format = kGuestOutputFormat;
-    image.texture = wgpuDeviceCreateTexture(device_.device(), &texture_desc);
-    if (!image.texture) {
-      return false;
+  bool refreshed = false;
+  device_thread_.Call([&] {
+    GuestOutputImage& image = guest_output_images_[mailbox_index];
+    if (!image.texture || image.width != frontbuffer_width || image.height != frontbuffer_height) {
+      // Any paint still using the old texture holds its own reference.
+      ReleaseGuestOutputImage(image);
+      WGPUTextureDescriptor texture_desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
+      texture_desc.label = View("Guest output");
+      texture_desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_RenderAttachment |
+                           WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopyDst |
+                           WGPUTextureUsage_CopySrc;
+      texture_desc.size = {frontbuffer_width, frontbuffer_height, 1};
+      texture_desc.format = kGuestOutputFormat;
+      image.texture = wgpuDeviceCreateTexture(device().device(), &texture_desc);
+      if (!image.texture) {
+        return;
+      }
+      image.view = wgpuTextureCreateView(image.texture, nullptr);
+      WGPUBindGroupEntry entries[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
+      entries[0].binding = 0;
+      entries[0].textureView = image.view;
+      entries[1].binding = 1;
+      entries[1].sampler = guest_output_sampler_;
+      WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+      group_desc.layout = guest_output_bind_group_layout_;
+      group_desc.entryCount = 2;
+      group_desc.entries = entries;
+      image.bind_group = wgpuDeviceCreateBindGroup(device().device(), &group_desc);
+      image.width = frontbuffer_width;
+      image.height = frontbuffer_height;
     }
-    image.view = wgpuTextureCreateView(image.texture, nullptr);
-    WGPUBindGroupEntry entries[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
-    entries[0].binding = 0;
-    entries[0].textureView = image.view;
-    entries[1].binding = 1;
-    entries[1].sampler = guest_output_sampler_;
-    WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
-    group_desc.layout = guest_output_bind_group_layout_;
-    group_desc.entryCount = 2;
-    group_desc.entries = entries;
-    image.bind_group = wgpuDeviceCreateBindGroup(device_.device(), &group_desc);
-    image.width = frontbuffer_width;
-    image.height = frontbuffer_height;
-  }
-  WebGPUGuestOutputRefreshContext context(is_8bpc_out_ref, image.texture, image.view);
-  context.SetIs8bpc(true);
-  return refresher(context);
+    WebGPUGuestOutputRefreshContext context(is_8bpc_out_ref, image.texture, image.view);
+    context.SetIs8bpc(true);
+    refreshed = refresher(context);
+  });
+  return refreshed;
 }
 
 WGPURenderPipeline WebGPUPresenter::GetGuestOutputPipeline(WGPUTextureFormat format) {
@@ -348,13 +391,20 @@ WGPURenderPipeline WebGPUPresenter::GetGuestOutputPipeline(WGPUTextureFormat for
   desc.vertex.module = guest_output_shader_;
   desc.vertex.entryPoint = View("vs");
   desc.fragment = &fragment;
-  guest_output_pipeline_ = wgpuDeviceCreateRenderPipeline(device_.device(), &desc);
+  guest_output_pipeline_ = wgpuDeviceCreateRenderPipeline(device().device(), &desc);
   guest_output_pipeline_format_ = format;
   return guest_output_pipeline_;
 }
 
 Presenter::PaintResult WebGPUPresenter::PaintAndPresentImpl(bool execute_ui_drawers) {
-  if (device_.is_lost()) {
+  // The UI drawers run on the device thread too, while the UI thread waits.
+  PaintResult result;
+  device_thread_.Call([&] { result = Paint(execute_ui_drawers); });
+  return result;
+}
+
+Presenter::PaintResult WebGPUPresenter::Paint(bool execute_ui_drawers) {
+  if (device().is_lost()) {
     return PaintResult::kGpuLostExternally;
   }
   if (!surface_) {
@@ -382,7 +432,7 @@ Presenter::PaintResult WebGPUPresenter::PaintAndPresentImpl(bool execute_ui_draw
   bool suboptimal = surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal;
   WGPUTextureView target = wgpuTextureCreateView(surface_texture.texture, nullptr);
 
-  WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device_.device(), nullptr);
+  WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device().device(), nullptr);
   WGPURenderPassColorAttachment attachment = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
   attachment.view = target;
   attachment.loadOp = WGPULoadOp_Clear;
@@ -407,7 +457,7 @@ Presenter::PaintResult WebGPUPresenter::PaintAndPresentImpl(bool execute_ui_draw
     }
   }
   if (guest_output_group) {
-    uint32_t max_size = device_.limits().maxTextureDimension2D;
+    uint32_t max_size = device().limits().maxTextureDimension2D;
     GuestOutputPaintFlow flow = GetGuestOutputPaintFlow(properties, surface_width_, surface_height_,
                                                         max_size, max_size, paint_config);
     if (flow.effect_count) {
@@ -443,7 +493,7 @@ Presenter::PaintResult WebGPUPresenter::PaintAndPresentImpl(bool execute_ui_draw
   wgpuRenderPassEncoderEnd(pass);
   wgpuRenderPassEncoderRelease(pass);
   WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
-  wgpuQueueSubmit(device_.queue(), 1, &commands);
+  wgpuQueueSubmit(device().queue(), 1, &commands);
   wgpuCommandBufferRelease(commands);
   wgpuCommandEncoderRelease(encoder);
 
@@ -456,11 +506,12 @@ Presenter::PaintResult WebGPUPresenter::PaintAndPresentImpl(bool execute_ui_draw
     }
   }
   if (capture) {
-    RawImage image;
-    if (ReadBackTexture(surface_texture.texture, surface_format_, surface_width_, surface_height_,
-                        image)) {
-      capture(std::move(image));
-    }
+    ReadBackTexture(surface_texture.texture, surface_format_, surface_width_, surface_height_,
+                    [capture = std::move(capture)](bool ok, RawImage&& image) {
+                      if (ok) {
+                        capture(std::move(image));
+                      }
+                    });
   }
 
   WGPUStatus present_status = wgpuSurfacePresent(surface_);
@@ -472,97 +523,106 @@ Presenter::PaintResult WebGPUPresenter::PaintAndPresentImpl(bool execute_ui_draw
   return suboptimal ? PaintResult::kPresentedSuboptimal : PaintResult::kPresented;
 }
 
-bool WebGPUPresenter::ReadBackTexture(WGPUTexture texture, WGPUTextureFormat format, uint32_t width,
-                                      uint32_t height, RawImage& image_out) {
-#if defined(__EMSCRIPTEN__)
-  (void)texture;
-  (void)format;
-  (void)width;
-  (void)height;
-  (void)image_out;
-  // Needs the device thread: the browser can't wait for a map here.
-  return false;
-#else
-  uint32_t row_pitch = (width * 4 + 255) & ~uint32_t(255);
+void WebGPUPresenter::ReadBackTexture(WGPUTexture texture, WGPUTextureFormat format, uint32_t width,
+                                      uint32_t height,
+                                      std::function<void(bool ok, RawImage&& image)> done) {
+  struct Readback {
+    WGPUBuffer buffer;
+    uint32_t width, height, row_pitch;
+    bool bgra;
+    std::function<void(bool, RawImage&&)> done;
+  };
+  auto* readback = new Readback{
+      nullptr, width, height, (width * 4 + 255) & ~uint32_t(255), IsBgra(format), std::move(done)};
   WGPUBufferDescriptor buffer_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
-  buffer_desc.size = uint64_t(row_pitch) * height;
+  buffer_desc.size = uint64_t(readback->row_pitch) * height;
   buffer_desc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
-  WGPUBuffer buffer = wgpuDeviceCreateBuffer(device_.device(), &buffer_desc);
+  readback->buffer = wgpuDeviceCreateBuffer(device().device(), &buffer_desc);
 
   WGPUTexelCopyTextureInfo source = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
   source.texture = texture;
   WGPUTexelCopyBufferInfo destination = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
-  destination.buffer = buffer;
-  destination.layout.bytesPerRow = row_pitch;
+  destination.buffer = readback->buffer;
+  destination.layout.bytesPerRow = readback->row_pitch;
   destination.layout.rowsPerImage = height;
   WGPUExtent3D extent = {width, height, 1};
-  WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device_.device(), nullptr);
+  WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device().device(), nullptr);
   wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &extent);
   WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
-  wgpuQueueSubmit(device_.queue(), 1, &commands);
+  wgpuQueueSubmit(device().queue(), 1, &commands);
   wgpuCommandBufferRelease(commands);
   wgpuCommandEncoderRelease(encoder);
 
-  bool mapped = false;
+  // Completes on the device thread once the copy has run; nothing waits here.
   WGPUBufferMapCallbackInfo callback = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
-  callback.mode = WGPUCallbackMode_WaitAnyOnly;
-  callback.userdata1 = &mapped;
+  callback.mode = kDeviceThreadCallbackMode;
+  callback.userdata1 = readback;
   callback.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* userdata, void*) {
-    *static_cast<bool*>(userdata) = status == WGPUMapAsyncStatus_Success;
-  };
-  WGPUFutureWaitInfo wait = {
-      wgpuBufferMapAsync(buffer, WGPUMapMode_Read, 0, buffer_desc.size, callback), false};
-  wgpuInstanceWaitAny(device_.instance(), 1, &wait, UINT64_MAX);
-  if (mapped) {
-    auto* data =
-        static_cast<const uint8_t*>(wgpuBufferGetConstMappedRange(buffer, 0, buffer_desc.size));
-    image_out.width = width;
-    image_out.height = height;
-    image_out.stride = size_t(width) * 4;
-    image_out.data.resize(image_out.stride * height);
-    bool bgra = IsBgra(format);
-    for (uint32_t y = 0; y < height; ++y) {
-      const uint8_t* src = data + size_t(row_pitch) * y;
-      uint8_t* dst = image_out.data.data() + image_out.stride * y;
-      for (uint32_t x = 0; x < width; ++x) {
-        dst[x * 4 + 0] = src[x * 4 + (bgra ? 2 : 0)];
-        dst[x * 4 + 1] = src[x * 4 + 1];
-        dst[x * 4 + 2] = src[x * 4 + (bgra ? 0 : 2)];
-        dst[x * 4 + 3] = 0xFF;
+    std::unique_ptr<Readback> readback(static_cast<Readback*>(userdata));
+    RawImage image;
+    bool ok = status == WGPUMapAsyncStatus_Success;
+    if (ok) {
+      uint64_t size = uint64_t(readback->row_pitch) * readback->height;
+      auto* data =
+          static_cast<const uint8_t*>(wgpuBufferGetConstMappedRange(readback->buffer, 0, size));
+      image.width = readback->width;
+      image.height = readback->height;
+      image.stride = size_t(readback->width) * 4;
+      image.data.resize(image.stride * readback->height);
+      for (uint32_t y = 0; y < readback->height; ++y) {
+        const uint8_t* src = data + size_t(readback->row_pitch) * y;
+        uint8_t* dst = image.data.data() + image.stride * y;
+        for (uint32_t x = 0; x < readback->width; ++x) {
+          dst[x * 4 + 0] = src[x * 4 + (readback->bgra ? 2 : 0)];
+          dst[x * 4 + 1] = src[x * 4 + 1];
+          dst[x * 4 + 2] = src[x * 4 + (readback->bgra ? 0 : 2)];
+          dst[x * 4 + 3] = 0xFF;
+        }
       }
+      wgpuBufferUnmap(readback->buffer);
     }
-    wgpuBufferUnmap(buffer);
-  }
-  wgpuBufferRelease(buffer);
-  return mapped;
-#endif
+    wgpuBufferRelease(readback->buffer);
+    readback->done(ok, std::move(image));
+  };
+  wgpuBufferMapAsync(readback->buffer, WGPUMapMode_Read, 0, buffer_desc.size, callback);
 }
 
 bool WebGPUPresenter::CaptureGuestOutput(RawImage& image_out) {
-  WGPUTexture texture = nullptr;
-  uint32_t width = 0, height = 0;
-  {
-    uint32_t mailbox_index;
-    auto consumer_lock = ConsumeGuestOutput(mailbox_index, nullptr, nullptr);
-    if (mailbox_index == UINT32_MAX || !guest_output_images_[mailbox_index].texture) {
-      return false;
-    }
-    const GuestOutputImage& image = guest_output_images_[mailbox_index];
-    texture = image.texture;
-    wgpuTextureAddRef(texture);
-    width = image.width;
-    height = image.height;
+  if (device_thread_.IsCurrentThread()) {
+    // Waiting here would block the readback it waits for.
+    return false;
   }
-  bool captured = ReadBackTexture(texture, kGuestOutputFormat, width, height, image_out);
-  wgpuTextureRelease(texture);
-  return captured;
+  std::promise<bool> captured;
+  std::future<bool> captured_future = captured.get_future();
+  device_thread_.Call([&] {
+    WGPUTexture texture = nullptr;
+    uint32_t width = 0, height = 0;
+    {
+      uint32_t mailbox_index;
+      auto consumer_lock = ConsumeGuestOutput(mailbox_index, nullptr, nullptr);
+      if (mailbox_index != UINT32_MAX && guest_output_images_[mailbox_index].texture) {
+        const GuestOutputImage& image = guest_output_images_[mailbox_index];
+        texture = image.texture;
+        width = image.width;
+        height = image.height;
+      }
+    }
+    if (!texture) {
+      captured.set_value(false);
+      return;
+    }
+    ReadBackTexture(texture, kGuestOutputFormat, width, height, [&](bool ok, RawImage&& image) {
+      if (ok) {
+        image_out = std::move(image);
+      }
+      captured.set_value(ok);
+    });
+  });
+  return captured_future.get();
 }
 
 void WebGPUPresenter::CaptureNextPaint(std::function<void(RawImage&& image)> callback) {
   std::lock_guard<std::mutex> lock(capture_mutex_);
-  if (!surface_copy_src_ && surface_) {
-    REXLOG_WARN("WebGPU presenter: the surface can't be copied from; no capture");
-  }
   capture_next_paint_ = std::move(callback);
 }
 

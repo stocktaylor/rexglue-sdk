@@ -645,11 +645,13 @@ bool build_stvrx(BuilderContext& ctx) {
 
 bool build_stvx(BuilderContext& ctx) {
   emitVectorEA(ctx, "0xF");
+  ctx.println("\tREX_WRITE_WATCH_BEFORE({}, 16);", ctx.ea());
   ctx.println(
       "\tsimde_mm_store_si128((simde__m128i*)REX_RAW_ADDR({}), "
       "simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*){}.u8), "
       "simde_mm_load_si128((simde__m128i*)VectorMaskL)));",
       ctx.ea(), ctx.v(ctx.insn.operands[0]));
+  ctx.println("\tREX_WRITE_WATCH_AFTER({}, 16);", ctx.ea());
   return true;
 }
 

@@ -13,14 +13,14 @@ Last updated 2026-10-23, on the `wasm` branch.
 | 1. Build plumbing and null GPU | Done |
 | 2. Platform layer | Milestone reached: Blade runs under node. Shutdown, executable path and fibers remain |
 | 3. Codegen wasm mode | Done for Blade: within V8's limits, and floating point matches native bit for bit. Oversized functions (Crash) remain |
-| 4. GPU write tracking | Not started |
+| 4. GPU write tracking | Done: software write watches; audited natively on Blade with Vulkan, no missed writes |
 | 5. WebGPU backend | Not started |
 | 6. Packaging and hosting | Not started |
 
 Where things stand:
 
 - The SDK (runtime, null GPU plugin, third-party libraries) builds for wasm64, and the smoke test passes under node (checked locally; CI not rechecked).
-- **Blade** (the 1888 dashboard, `../Blade`) builds for wasm64 in about 100 s on a 16-core x86-64 Linux machine (`blade.wasm` is 46 MB) and runs under node with the null GPU: kernel startup, XAM/XConfig/audio setup, then the dashboard at a steady 59 fps with the same 181 draws and 2081 vertices per frame as a native build of the same revision. The null GPU's wireframes match native's (the remaining 0.08% of pixels is animation, as between two native frames), and emulating the guest's rounding modes costs about 1% of CPU time.
+- **Blade** (the 1888 dashboard, `../Blade`) builds for wasm64 in about 100 s on a 16-core x86-64 Linux machine (`blade.wasm` is 46 MB) and runs under node with the null GPU: kernel startup, XAM/XConfig/audio setup, then the dashboard at a steady 59 fps with the same 181 draws and 2081 vertices per frame as a native build of the same revision. The null GPU's wireframes match native's (the remaining 0.08% of pixels is animation, as between two native frames), emulating the guest's rounding modes costs about 1% of CPU time, and the write-watch checks on stores about another 2%.
 - **Burnout Crash** (`../Crash`) compiles except its DLL module's oversized functions (see [Oversized functions](#oversized-functions)); it hasn't linked, so static DLL module registration is still untested.
 - Phase 2's milestone was moved to **node first** (headless, host filesystem) instead of a browser tab: it proves memory, threads and kernel startup without data import, COOP/COEP hosting or a canvas, which move to phase 6.
 
@@ -29,10 +29,11 @@ Where things stand:
 1. Shutdown: under node the process hangs after `Execution complete` instead of exiting (natively it aborts with exit 134 at the same point, so part of it isn't wasm-specific).
 2. `GetExecutablePath` reads `/proc/self/exe`, which Emscripten lacks, so the executable folder is empty: the default `<app>.toml` config and `logs/` folder resolve nowhere and file logging silently fails. Pass `--log_file` until it reports the `.js` file's folder.
 3. Oversized functions: build them at `-O0` on wasm (per file, without the PCH), then split them in codegen for good (phase 3). Then finish Crash's build and run it, the first test of static DLL module registration.
-4. Check CI on this branch. On `4df853d` the wasm64 build passed but the smoke test failed, most likely the `CLOCK_MONOTONIC_RAW` divide-by-zero fixed in `1035cae`.
-5. The lint job fails on 10 files that were unformatted before this branch: `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/graphics_system.cpp`, `src/graphics/pipeline/shader/dxbc_translator.cpp`, `src/graphics/pipeline/shader/dxbc_translator_memexport.cpp`, `src/graphics/pipeline/shader/spirv_translator_fetch.cpp`, `src/kernel/xam/xam_content.cpp`, `src/kernel/xam/xam_info.cpp`, `src/system/lzx.cpp`, `src/system/xam/content_manager.cpp`, `src/system/xsocket.cpp`. Running `clang-format -i` (version 20.1.8, `scripts/requirements-dev.txt`) on them fixes it.
-6. Choose JSPI or Asyncify for fibers once a title needs guest fibers.
-7. Send SDL the dummy audio memory64 fix (see [Audio](#audio)) so the overlay can go.
+4. Audit a heavier title for host-side writes to watched memory (phase 4).
+5. Check CI on this branch. On `4df853d` the wasm64 build passed but the smoke test failed, most likely the `CLOCK_MONOTONIC_RAW` divide-by-zero fixed in `1035cae`.
+6. The lint job fails on 10 files that were unformatted before this branch: `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/graphics_system.cpp`, `src/graphics/pipeline/shader/dxbc_translator.cpp`, `src/graphics/pipeline/shader/dxbc_translator_memexport.cpp`, `src/graphics/pipeline/shader/spirv_translator_fetch.cpp`, `src/kernel/xam/xam_content.cpp`, `src/kernel/xam/xam_info.cpp`, `src/system/lzx.cpp`, `src/system/xam/content_manager.cpp`, `src/system/xsocket.cpp`. Running `clang-format -i` (version 20.1.8, `scripts/requirements-dev.txt`) on them fixes it.
+7. Choose JSPI or Asyncify for fibers once a title needs guest fibers.
+8. Send SDL the dummy audio memory64 fix (see [Audio](#audio)) so the overlay can go.
 
 ## Building
 
@@ -142,6 +143,16 @@ Checked with differential tests run natively and under node over 200k to 300k in
 
 Projects regenerated with an older `rexglue` still build; their scalar arithmetic just doesn't see directed rounding on wasm.
 
+### Write watches
+
+[write_watch.h](../include/rex/memory/write_watch.h): one bit per 4 KB guest page (128 KB for the 4 GB space), kept equal to the physical heaps' `notify_on_invalidation` flags by the two places that change them (`PhysicalHeap::EnableAccessCallbacks` sets, `TriggerCallbacks` clears; [xmemory.cpp](../src/system/xmemory.cpp)). The per-view semantics carry over: the 0xA0000000, 0xC0000000 and 0xE0000000 views of a physical page have separate bits, as natively they are separately protected mappings.
+
+Generated code calls `CheckWriteWatch(address, size)` around each write: below 0xA0000000 it is one compare; above, one bit test. A hit calls `OnWatchedWrite`, which runs `TriggerPhysicalMemoryCallbacks` per watched page with length 1 and loose unwatching, as the native fault handler does.
+
+- **Order on wasm: write, then check.** If a cache starts watching the page between the two, it either copies the new data or the check sees its watch. Checking first could miss both. The window isn't fully closed without a fence between the write and the check (StoreLoad ordering), which would cost every physical store; the remaining race needs the CPU to write a page at the moment the GPU starts watching it.
+- **Native audit mode:** the CMake option `REXGLUE_SOFTWARE_WRITE_WATCH` builds the checks natively, before each write instead, with page protection still on. A write the checks cover unwatches the page before it lands; one they miss faults on a page that is still watched, and `Memory::AccessViolationCallback` logs it with a backtrace (Linux). This is how to find host-side writers, which wasm can't see at all.
+- Generated by an older `rexglue`, a project still builds but its guest writes don't check watches on wasm; regenerate it (`rexglue codegen --ignore-stamp` when only the SDK changed).
+
 ### Audio
 
 Titles treat a failed XAudio client registration as fatal (Blade exits with `XAPI RETURN VALUE` 0x80300004, natively too), and node has no audio device. When SDL can't initialize audio, [sdl_audio_driver.cpp](../src/audio/sdl/sdl_audio_driver.cpp) retries with SDL's dummy driver, which consumes frames in real time. Only builds that include it have it (wasm does; native doesn't).
@@ -239,12 +250,12 @@ Codegen warns about functions over `max_file_size_bytes` (1 MB of C++). Crash's 
 
 ## Phase 4: GPU write tracking
 
-The GPU caches detect CPU writes to textures and vertex data by write-protecting physical pages and catching the fault: `EnablePhysicalMemoryAccessCallbacks`, called from [shared_memory.cpp](../src/graphics/shared_memory.cpp) and [primitive_processor.cpp](../src/graphics/primitive_processor.cpp). That cannot work without page protection. The null GPU doesn't need it.
+The GPU caches detect CPU writes to textures and vertex data by write-protecting physical pages and catching the fault: `EnablePhysicalMemoryAccessCallbacks`, called from [shared_memory.cpp](../src/graphics/shared_memory.cpp) and [primitive_processor.cpp](../src/graphics/primitive_processor.cpp). That cannot work without page protection. The null GPU doesn't need it; the WebGPU backend will.
 
-- [ ] Choose a replacement:
-  - **Dirty-page marking in store macros:** stores to physical addresses set a bit in a page bitmap, which the GPU caches read and clear. Exact, at a cost on every physical store. The wasm store helpers in pch_h.inja are the natural place.
-  - **Content hashing:** caches hash watched ranges before use. No store cost, but expensive for large resources and can miss rapid rewrites.
-- [ ] Wire the replacement into the shared-memory, texture and primitive caches.
+- [x] Replacement chosen: software write watches, marked per page and checked on every write (see [Write watches](#write-watches)). Content hashing would cost nothing per store but is expensive on large resources and misses rewrites.
+- [x] Every guest write path checks: `REX_STORE_*`, `REX_MM_STORE_*`, `dcbz`, `dcbz128`, `stvx` and `stwcx.`/`stdcx.`. The caches need no change: a hit makes the same `TriggerCallbacks` call as the native fault.
+- [x] Audited natively (`REXGLUE_SOFTWARE_WRITE_WATCH`): Blade on Vulkan for 25 s, hundreds of watched-page writes, none missed by the checks.
+- [ ] Audit a heavier title (one that streams textures or decodes video into GPU memory) for host-side writers. File reads already trigger callbacks explicitly ([xfile.cpp](../src/system/xfile.cpp)); any other host code writing watched memory must call `rex::memory::OnWatchedWrite` on wasm.
 
 ## Phase 5: WebGPU backend
 

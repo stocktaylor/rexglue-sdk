@@ -330,6 +330,13 @@ class PhysicalHeap : public BaseHeap {
  protected:
   bool IsHostPageWriteWatched(uint32_t host_page_number) const override;
 
+ private:
+  // Mirrors notify_on_invalidation for system pages [first, last] into the
+  // software write-watch bitmap (memory/write_watch.h).
+  void SetWriteWatchedSystemPages(uint32_t system_page_first, uint32_t system_page_last,
+                                  bool watched);
+
+ protected:
   // Allocation on these heaps delegates to parent_heap_, whose own reconcile
   // pass takes the global critical region. Acquire whenever this heap or its
   // parent will need it, so the ordering holds even for a heap whose own guest

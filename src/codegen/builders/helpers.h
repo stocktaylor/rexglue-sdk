@@ -304,11 +304,13 @@ inline void emitAtomicStoreConditional(BuilderContext& ctx, const char* ptr_type
   ctx.println("{}.u32;", ctx.r(ctx.insn.operands[2]));
   ctx.println("\t{}.lt = 0;", ctx.cr(0));
   ctx.println("\t{}.gt = 0;", ctx.cr(0));
+  ctx.println("\tREX_WRITE_WATCH_BEFORE({}, sizeof({}));", ctx.ea(), ptr_type);
   ctx.println(
       "\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<{}*>(REX_RAW_ADDR({})), "
       "{}.{}, {}({}.{}));",
       ctx.cr(0), ptr_type, ctx.ea(), ctx.reserved(), field, bswap_func, ctx.r(ctx.insn.operands[0]),
       field);
+  ctx.println("\tif ({}.eq) REX_WRITE_WATCH_AFTER({}, sizeof({}));", ctx.cr(0), ctx.ea(), ptr_type);
   ctx.println("\t{}.so = {}.so;", ctx.cr(0), ctx.xer());
 }
 

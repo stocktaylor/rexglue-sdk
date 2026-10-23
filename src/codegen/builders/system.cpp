@@ -153,7 +153,9 @@ bool build_dcbz(BuilderContext& ctx) {
   if (ctx.insn.operands[0] != 0)
     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[0]));
   ctx.println("{}.u32) & ~31;", ctx.r(ctx.insn.operands[1]));
+  ctx.println("\tREX_WRITE_WATCH_BEFORE({}, 32);", ctx.ea());
   ctx.println("\tmemset((void*)REX_RAW_ADDR({}), 0, 32);", ctx.ea());
+  ctx.println("\tREX_WRITE_WATCH_AFTER({}, 32);", ctx.ea());
   return true;
 }
 
@@ -163,7 +165,9 @@ bool build_dcbzl(BuilderContext& ctx) {
   if (ctx.insn.operands[0] != 0)
     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[0]));
   ctx.println("{}.u32) & ~127;", ctx.r(ctx.insn.operands[1]));
+  ctx.println("\tREX_WRITE_WATCH_BEFORE({}, 128);", ctx.ea());
   ctx.println("\tmemset((void*)REX_RAW_ADDR({}), 0, 128);", ctx.ea());
+  ctx.println("\tREX_WRITE_WATCH_AFTER({}, 128);", ctx.ea());
   return true;
 }
 

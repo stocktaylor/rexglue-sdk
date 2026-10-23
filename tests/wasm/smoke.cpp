@@ -18,8 +18,10 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <utility>
 
 #include <rex/cvar.h>
+#include <rex/memory/write_watch.h>
 #include <rex/platform.h>
 #include <rex/ppc/fpu.h>
 #include <rex/ppc/intrinsics.h>
@@ -39,6 +41,8 @@ void Check(bool ok, const char* what) {
     ++failures;
   }
 }
+
+void CheckWriteWatch(rex::memory::Memory& memory, uint32_t address);
 
 void CheckGuestMemory() {
   rex::memory::Memory memory;
@@ -82,6 +86,47 @@ void CheckGuestMemory() {
   *memory.TranslateVirtual<uint32_t*>(0x40001000) = 0x55AA55AA;
   Check(*memory.TranslatePhysical<uint32_t*>(0x00001000) != 0x55AA55AA,
         "virtual memory is separate from physical");
+
+  if (allocated) {
+    CheckWriteWatch(memory, address);
+  }
+}
+
+// GPU caches watch physical pages and drop their copy on the first CPU write.
+// Wasm can't fault on a read-only page, so writes check a bitmap
+// (memory/write_watch.h) and make the same callback.
+void CheckWriteWatch(rex::memory::Memory& memory, uint32_t address) {
+  struct Seen {
+    uint32_t calls = 0;
+    uint32_t start = 0;
+  } seen;
+  auto callback = [](void* context, uint32_t start, uint32_t length,
+                     bool exact) -> std::pair<uint32_t, uint32_t> {
+    auto* s = static_cast<Seen*>(context);
+    ++s->calls;
+    s->start = start;
+    return {0, UINT32_MAX};
+  };
+  void* handle = memory.RegisterPhysicalMemoryInvalidationCallback(callback, &seen);
+  uint32_t physical = memory.GetPhysicalAddress(address);
+
+  memory.EnablePhysicalMemoryAccessCallbacks(physical, 0x1000, true, false);
+  Check(rex::memory::IsWriteWatched(rex::memory::WriteWatchBits(), address),
+        "watching a physical page sets its write-watch bit");
+  Check(!rex::memory::IsWriteWatched(rex::memory::WriteWatchBits(), address + 0x1000),
+        "the next page stays unwatched");
+
+  // As generated code stores: write, then check.
+  *memory.TranslateVirtual<uint32_t*>(address + 0x10) = 0x01020304;
+  rex::memory::CheckWriteWatch(address + 0x10, 4);
+  Check(seen.calls == 1 && seen.start == (physical & ~0xFFFu),
+        "a write to a watched page runs the invalidation callback for it");
+  Check(!rex::memory::IsWriteWatched(rex::memory::WriteWatchBits(), address),
+        "the callback unwatches the page");
+  rex::memory::CheckWriteWatch(address + 0x20, 4);
+  Check(seen.calls == 1, "a watch fires once");
+
+  memory.UnregisterPhysicalMemoryInvalidationCallback(handle);
 }
 
 // Sets the guest rounding mode (FPSCR[RN]: 0 nearest, 1 toward zero, 2 up,

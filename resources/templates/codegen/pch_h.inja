@@ -136,6 +136,23 @@ extern PPCFuncMapping PPCFuncMappings[];
 
 #define REX_RAW_ADDR(x) (base + (u32)(x) + REX_PHYS_HOST_OFFSET(x))
 
+// GPU write watches (memory/write_watch.h): natively a write fault on a
+// read-only page. WebAssembly checks after each write: if a GPU cache starts
+// watching the page meanwhile, either it copies the new data or the check sees
+// the watch. A native audit checks before the write, ahead of the fault, so a
+// fault that still lands on a watched page is a write the checks miss.
+#include <rex/memory/write_watch.h>
+#if REX_SOFTWARE_WRITE_WATCH && REX_PLATFORM_WASM
+#define REX_WRITE_WATCH_BEFORE(addr, size) ((void)0)
+#define REX_WRITE_WATCH_AFTER(addr, size) ::rex::memory::CheckWriteWatch((u32)(addr), (size))
+#elif REX_SOFTWARE_WRITE_WATCH
+#define REX_WRITE_WATCH_BEFORE(addr, size) ::rex::memory::CheckWriteWatch((u32)(addr), (size))
+#define REX_WRITE_WATCH_AFTER(addr, size) ((void)0)
+#else
+#define REX_WRITE_WATCH_BEFORE(addr, size) ((void)0)
+#define REX_WRITE_WATCH_AFTER(addr, size) ((void)0)
+#endif
+
 #define REX_LOAD_U8(x) (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #define REX_LOAD_U16(x) __builtin_bswap16(*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #define REX_LOAD_U32(x) __builtin_bswap32(*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
@@ -143,10 +160,10 @@ extern PPCFuncMapping PPCFuncMappings[];
 #define REX_LOAD_STRING(x, len) \
   std::string_view(reinterpret_cast<const char*>(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)), (len))
 
-#define REX_STORE_U8(x, y)  (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = (y))
-#define REX_STORE_U16(x, y) (*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap16(y))
-#define REX_STORE_U32(x, y) (*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap32(y))
-#define REX_STORE_U64(x, y) (*(volatile u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap64(y))
+#define REX_STORE_U8(x, y)  (REX_WRITE_WATCH_BEFORE(x, 1), (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = (y)), REX_WRITE_WATCH_AFTER(x, 1))
+#define REX_STORE_U16(x, y) (REX_WRITE_WATCH_BEFORE(x, 2), (*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap16(y)), REX_WRITE_WATCH_AFTER(x, 2))
+#define REX_STORE_U32(x, y) (REX_WRITE_WATCH_BEFORE(x, 4), (*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap32(y)), REX_WRITE_WATCH_AFTER(x, 4))
+#define REX_STORE_U64(x, y) (REX_WRITE_WATCH_BEFORE(x, 8), (*(volatile u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap64(y)), REX_WRITE_WATCH_AFTER(x, 8))
 
 #define REX_MEMORY_SIZE 0x100000000ull
 
@@ -163,7 +180,9 @@ extern PPCFuncMapping PPCFuncMappings[];
       rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr,                  \
                                                               static_cast<u32>(val));      \
     } else {                                                                               \
+      REX_WRITE_WATCH_BEFORE(_mmio_addr, 1);                                               \
       *(volatile u8*)(base + _mmio_addr + REX_PHYS_HOST_OFFSET(_mmio_addr)) = (val);       \
+      REX_WRITE_WATCH_AFTER(_mmio_addr, 1);                                                \
     }                                                                                      \
   } while (0)
 
@@ -174,8 +193,10 @@ extern PPCFuncMapping PPCFuncMappings[];
       rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr,                  \
                                                               static_cast<u32>(val));      \
     } else {                                                                               \
+      REX_WRITE_WATCH_BEFORE(_mmio_addr, 2);                                               \
       *(volatile u16*)(base + _mmio_addr + REX_PHYS_HOST_OFFSET(_mmio_addr)) =             \
           __builtin_bswap16(val);                                                          \
+      REX_WRITE_WATCH_AFTER(_mmio_addr, 2);                                                \
     }                                                                                      \
   } while (0)
 
@@ -186,8 +207,10 @@ extern PPCFuncMapping PPCFuncMappings[];
       rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr,                  \
                                                               static_cast<u32>(val));      \
     } else {                                                                               \
+      REX_WRITE_WATCH_BEFORE(_mmio_addr, 4);                                               \
       *(volatile u32*)(base + _mmio_addr + REX_PHYS_HOST_OFFSET(_mmio_addr)) =             \
           __builtin_bswap32(val);                                                          \
+      REX_WRITE_WATCH_AFTER(_mmio_addr, 4);                                                \
     }                                                                                      \
   } while (0)
 
@@ -201,8 +224,10 @@ extern PPCFuncMapping PPCFuncMappings[];
       rex::runtime::MMIOHandler::global_handler()->CheckStore(_mmio_addr + 4,                     \
                                                               static_cast<u32>(_v64));            \
     } else {                                                                                      \
+      REX_WRITE_WATCH_BEFORE(_mmio_addr, 8);                                                      \
       *(volatile u64*)(base + _mmio_addr + REX_PHYS_HOST_OFFSET(_mmio_addr)) =                    \
           __builtin_bswap64(val);                                                                 \
+      REX_WRITE_WATCH_AFTER(_mmio_addr, 8);                                                       \
     }                                                                                             \
   } while (0)
 
@@ -295,6 +320,7 @@ inline void rex_wasm_store(u8* base, u32 address, T value) {
     }
   }
   *(volatile T*)(base + address + REX_PHYS_HOST_OFFSET(address)) = rex_wasm_bswap(value);
+  ::rex::memory::CheckWriteWatch(address, sizeof(T));
 }
 
 #undef REX_LOAD_U8

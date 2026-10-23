@@ -11,8 +11,12 @@
 
 #include <algorithm>
 #include <cstring>
+#include <atomic>
 #include <utility>
 
+#if defined(__linux__)
+#include <execinfo.h>
+#endif
 #if REX_PLATFORM_MAC
 #include <sys/mman.h>
 #endif
@@ -24,6 +28,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/memory/write_watch.h>
 #include <rex/stream.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/mmio_handler.h>
@@ -95,6 +100,54 @@ void CrashDump() {
   }
   active_memory_->DumpMap();
   --in_crash_dump;
+}
+
+//=============================================================================
+// Software write watches (memory/write_watch.h)
+//=============================================================================
+
+#if REX_PLATFORM_WASM
+static uint64_t* MutableWriteWatchBits() {
+  return g_write_watch_bits;
+}
+#else
+static uint64_t g_native_write_watch_bits[kWriteWatchWords] = {};
+static uint64_t* MutableWriteWatchBits() {
+  return g_native_write_watch_bits;
+}
+const uint64_t* WriteWatchBits() {
+  return g_native_write_watch_bits;
+}
+#endif
+
+// Marks or clears the 4 KB guest pages overlapping [first, last].
+static void SetWriteWatched(uint32_t first, uint32_t last, bool watched) {
+  uint64_t* bits = MutableWriteWatchBits();
+  for (uint32_t page = first >> kWriteWatchPageShift; page <= (last >> kWriteWatchPageShift);
+       ++page) {
+    uint64_t bit = uint64_t(1) << (page & 63);
+    if (watched) {
+      bits[page >> 6] |= bit;
+    } else {
+      bits[page >> 6] &= ~bit;
+    }
+  }
+}
+
+void OnWatchedWrite(uint32_t address, uint32_t length) {
+  if (!active_memory_) {
+    return;
+  }
+  // A write fault per watched page, as natively (length 1 within the page).
+  uint32_t last = address + length - 1;
+  for (uint32_t page = address >> kWriteWatchPageShift; page <= (last >> kWriteWatchPageShift);
+       ++page) {
+    uint32_t page_address = std::max(address, page << kWriteWatchPageShift);
+    if (IsWriteWatched(WriteWatchBits(), page_address)) {
+      active_memory_->TriggerPhysicalMemoryCallbacks(
+          rex::thread::global_critical_region::AcquireDirect(), page_address, 1, true, false);
+    }
+  }
 }
 
 Memory::Memory() {
@@ -624,6 +677,23 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
     }
     return false;
   }
+
+#if REX_SOFTWARE_WRITE_WATCH && !REX_PLATFORM_WASM
+  // Audit mode (memory/write_watch.h): software checks unwatch a page before
+  // its write lands, so a write still faulting on a watched page is one they
+  // miss, which wasm can't see at all.
+  if (is_write && IsWriteWatched(WriteWatchBits(), virtual_address)) {
+    static std::atomic<uint32_t> reported{0};
+    if (reported.fetch_add(1) < 64) {
+      REXSYS_WARN("Write watch on guest 0x{:08X} reached by a fault, missed by software checks",
+                  virtual_address);
+#if REX_PLATFORM_LINUX
+      void* frames[24];
+      backtrace_symbols_fd(frames, backtrace(frames, 24), 2);
+#endif
+    }
+  }
+#endif
 
   // Access violation callbacks from the guest are triggered when the global
   // critical region mutex is locked once.
@@ -2234,6 +2304,7 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
           // stricter protection.
           protect_system_page = true;
           page_flags_block.notify_on_invalidation |= page_flags_bit;
+          SetWriteWatchedSystemPages(i, i, true);
         }
       }
     }
@@ -2409,8 +2480,26 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
     }
     system_page_flags_[i].notify_on_invalidation &= mask;
   }
+  SetWriteWatchedSystemPages(system_page_first, system_page_last, false);
 
   return true;
+}
+
+void PhysicalHeap::SetWriteWatchedSystemPages(uint32_t system_page_first, uint32_t system_page_last,
+                                              bool watched) {
+  // System pages count from membase_ + heap_base_ including
+  // host_address_offset(), so page i starts at guest heap_base_ + i * size -
+  // host_address_offset(). Clamp to the heap: the first page of an offset
+  // heap starts before it.
+  int64_t first =
+      int64_t(heap_base_) + int64_t(system_page_first) * system_page_size_ - host_address_offset();
+  int64_t last = int64_t(heap_base_) + (int64_t(system_page_last) + 1) * system_page_size_ - 1 -
+                 host_address_offset();
+  first = std::max<int64_t>(first, heap_base_);
+  last = std::min<int64_t>(last, int64_t(heap_base_) + heap_size_ - 1);
+  if (first <= last) {
+    SetWriteWatched(uint32_t(first), uint32_t(last), watched);
+  }
 }
 
 std::unique_lock<std::recursive_mutex> PhysicalHeap::AcquireHostPageReconcileLock() const {

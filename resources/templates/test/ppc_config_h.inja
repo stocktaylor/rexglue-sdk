@@ -84,6 +84,8 @@
 #endif
 
 #define REX_RAW_ADDR(x) (base + (u32)(x) + REX_PHYS_HOST_OFFSET(x))
+#define REX_WRITE_WATCH_BEFORE(addr, size) ((void)0)
+#define REX_WRITE_WATCH_AFTER(addr, size) ((void)0)
 
 #define REX_LOAD_U8(x) (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #define REX_LOAD_U16(x) __builtin_bswap16(*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))

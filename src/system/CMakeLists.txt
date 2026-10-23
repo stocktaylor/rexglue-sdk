@@ -112,6 +112,11 @@ if(REXGLUE_ENABLE_TRACY)
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
 endif()
 
+# Generated code checks GPU write watches in software (memory/write_watch.h).
+if(REXGLUE_SOFTWARE_WRITE_WATCH)
+    target_compile_definitions(rexruntime PUBLIC REX_SOFTWARE_WRITE_WATCH=1)
+endif()
+
 if(REXGLUE_ENABLE_PERF_COUNTERS)
     target_compile_definitions(rexruntime PUBLIC
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)

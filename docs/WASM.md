@@ -14,7 +14,7 @@ Last updated 2026-10-23, on the `wasm` branch.
 | 2. Platform layer | Milestone reached: Blade runs under node. Shutdown, executable path and fibers remain |
 | 3. Codegen wasm mode | Done for Blade: within V8's limits, and floating point matches native bit for bit. Oversized functions (Crash) remain |
 | 4. GPU write tracking | Done: software write watches; audited natively on Blade with Vulkan, no missed writes |
-| 5. WebGPU backend | Not started |
+| 5. WebGPU backend | Design chosen (Vulkan backend as the base, WGSL emitter, device thread, native Dawn); implementation not started |
 | 6. Packaging and hosting | Not started |
 
 Where things stand:
@@ -259,17 +259,34 @@ The GPU caches detect CPU writes to textures and vertex data by write-protecting
 
 ## Phase 5: WebGPU backend
 
-The largest item. For scale, the Vulkan backend ([src/graphics/vulkan](../src/graphics/vulkan)) is about 21k lines and the SPIR-V translator (`spirv_translator*.cpp` in [src/graphics/pipeline/shader](../src/graphics/pipeline/shader)) about 12k.
+The largest item. For scale, the Vulkan backend ([src/graphics/vulkan](../src/graphics/vulkan)) is about 21k lines, its presenter and drawers ([src/ui/vulkan](../src/ui/vulkan)) about 7k, and the SPIR-V translator (`spirv_translator*.cpp` in [src/graphics/pipeline/shader](../src/graphics/pipeline/shader)) about 12k. What the backends share stays as is: the shader front end ([translator.cpp](../src/graphics/pipeline/shader/translator.cpp)), the render target, texture and primitive caches, shared memory with its write watches (phase 4), and the resolve readback modes.
 
-- [ ] New `src/graphics/webgpu` and `src/ui/webgpu` (presenter, immediate drawer, ImGui) on Dawn's Emscripten bindings (emdawnwebgpu).
-- [ ] Shaders in WGSL, through one of:
-  - a WGSL emitter alongside the DXBC and SPIR-V translators (preferred), or
-  - SPIR-V translated by Tint compiled to wasm at runtime (several MB, slow pipeline creation).
-- [ ] Render targets without fragment shader interlock, which WebGPU lacks (the Vulkan backend uses it for EDRAM emulation). Start from the non-interlock render-target path and accept its accuracy limits.
-- [ ] Rectangle lists and point sprites without geometry shaders: expand in the vertex shader or a compute pass.
-- [ ] Shared memory in chunks: the 512 MB buffer exceeds WebGPU's storage buffer binding limit (128 MB by default, higher on some adapters).
-- [ ] Texture formats: map Xenos formats to what WebGPU supports, with compute decompression or conversion for the rest.
-- [ ] Present through OffscreenCanvas, since rendering happens in a worker.
+### Decisions (2026-10-23)
+
+1. **Base: port the Vulkan backend.** It already has a fallback for nearly everything WebGPU lacks: the non-interlock render target path (`kHostRenderTargets`), 2x MSAA through 4x, stencil transfers without stencil export, missing clip distances and depth clamp, and rectangle lists and point sprites expanded in the vertex shader (`kRectangleListAsTriangleStrip`, `kPointListAsTriangleStrip`) instead of geometry shaders. D3D12 is the other candidate, but SPIR-V is structurally closer to WGSL.
+2. **Shaders: a WGSL emitter**, a third translator beside DXBC and SPIR-V on the shared front end, modeled on `spirv_translator`. It writes WGSL text directly: one compile in the browser, no extra wasm payload, and errors point at our code. Rejected: converting SPIR-V at runtime with Tint compiled to wasm (several MB, a second compile per shader, and Tint's SPIR-V reader only accepts SPIR-V 1.3 for Vulkan 1.1 and refuses some of what the translator emits). The ~97 fixed internal shaders (texture loads, resolves, gamma; [src/graphics/shaders/vulkan_spirv](../src/graphics/shaders/vulkan_spirv), whose `.xesl` sources aren't in this repository) are converted once, offline, with Dawn's Tint, and the WGSL is checked in like the SPIR-V headers.
+3. **Threading: a WebGPU device thread.** In the browser a WebGPU device belongs to the worker that created it, mapping buffers is asynchronous, and a canvas presents only when its worker returns to its event loop. So one pthread owns the device and the OffscreenCanvas and runs only queued work, returning to its event loop in between. The command processor records commands (the Vulkan backend already records into a deferred command buffer) and hands batches over through Emscripten's proxying queue; it blocks on a futex only for object creation and readbacks. Only standard pthreads: no JSPI. Rejected: JSPI on the command processor thread (fewer moving parts, but JSPI with pthreads, `PROXY_TO_PTHREAD` and memory64 together is barely exercised) and Asyncify (it would instrument all 46 MB of guest code).
+4. **API: `webgpu.h`, developed natively on Dawn.** Natively, Dawn (Chrome's WebGPU implementation) is an optional backend (`gpu_backend=webgpu`), so the backend is written and debugged in the desktop build with RenderDoc and compared with Vulkan on the same title; in the browser the same code builds with Emscripten's emdawnwebgpu port (`--use-port=emdawnwebgpu`). Natively the device thread can be the command processor thread itself.
+
+### Constraints that shape it
+
+- **Browsers:** WebGPU is in Chrome/Edge (113+), Firefox (141+, Windows first) and Safari 26. Memory64 is in Chrome 133+ and Firefox 134+, but in Safari only in Technology Preview (251, August 2026), so Chrome/Edge and Firefox on Windows are the realistic targets for now.
+- **Shared memory:** one 512 MB storage buffer needs `maxBufferSize` and `maxStorageBufferBindingSize` of at least 512 MB, requested at device creation (the defaults are 256 and 128 MB; desktop adapters report 1 GB or more). Fall back to binding it in windows if an adapter can't.
+- **Optional features to request, with fallbacks when missing:** `texture-formats-tier1` (16-bit unorm/snorm render targets for k_16_16 and k_16_16_16_16, else the existing float fallback), `dual-source-blending`, `clip-distances`, `depth-clip-control`, `float32-blendable`, `texture-compression-bc`, `primitive-index`.
+- **Formats and samples:** no 2x MSAA (only 1x and 4x), depth24plus may be 32-bit float, no 10:11:11 or 2:10:10:10 float targets beyond `rg11b10ufloat`; the existing format fallbacks of the host render target path cover these.
+- **Shaders:** WGSL rejects derivatives (implicit-LOD sampling) in non-uniform control flow, which Xenos flow control produces; use `diagnostic(off, derivative_uniformity)` or explicit LOD and gradients. No `discard` in vertex stages, no 64-bit types, no geometry or tessellation stages.
+- **Resolve and memexport readback:** use the delayed modes (`readback_resolve=fast|some`, `readback_memexport_fast`), which fit asynchronous buffer mapping; full synchronous readback costs a round trip through the device thread.
+- **Presentation:** in the browser, the device thread draws into the OffscreenCanvas's current texture and the frame shows when it returns to its event loop; the UI's presenter must not call WebGPU from the UI thread. (Another Emscripten emulator port reports `wgpuSurfacePresent` aborting in emdawnwebgpu on a pthread; it presents by submitting to the canvas texture.)
+
+### Plan
+
+- [ ] Native Dawn as an optional third-party dependency and `gpu_backend=webgpu`; the emdawnwebgpu port for wasm.
+- [ ] `src/ui/webgpu`: presenter, immediate drawer and ImGui, first natively on an SDL window surface.
+- [ ] Device thread and command batching, with the native build running it inline.
+- [ ] WGSL emitter: vertex and pixel shaders, then fetch (vertex and texture), then render target output, then memexport.
+- [ ] Internal shaders: offline SPIR-V to WGSL with Tint, checked in, with the conversion scripted.
+- [ ] `src/graphics/webgpu`: shared memory, primitive processor, texture cache, render target cache (host render targets only), pipeline cache, command processor.
+- [ ] Bring-up natively on Blade against Vulkan, then the browser (OffscreenCanvas on the device thread; phase 6 hosting).
 
 ## Phase 6: Packaging and hosting
 
@@ -285,7 +302,5 @@ The largest item. For scale, the Vulkan backend ([src/graphics/vulkan](../src/gr
 ## Open questions
 
 - JSPI or Asyncify for fibers, given current browser support for JSPI.
-- Dirty-page marking or hashing for GPU write tracking.
-- WGSL emitter or runtime Tint.
 - Whether any target titles rely on hardware faults (guest SEH, null-page reads) closely enough to need emulation.
 - How long a full game takes to compile for wasm on a fast x86-64 machine, and whether generated functions need splitting.

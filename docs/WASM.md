@@ -83,6 +83,16 @@ cmake --build Blade/out/build/wasm64 --parallel
 
 `BLADE_LAUNCHER=OFF` builds the stock dashboard: launcher mode starts other titles with `fork`/`execv`, which Emscripten only stubs. Crash configures the same way, without that option.
 
+### WebGPU (in development)
+
+```bash
+cmake --preset linux-amd64 -B out/build/linux-amd64-webgpu -DREXGLUE_USE_WEBGPU=ON
+cmake --build out/build/linux-amd64-webgpu --config Release --target rexglue-webgpu-device
+out/linux-amd64/Release/rexglue-webgpu-device
+```
+
+The first configure downloads Dawn (about 30 MB) into `out/deps`. For wasm, add `-DREXGLUE_USE_WEBGPU=ON` to the `wasm64` preset.
+
 ### Running under node
 
 ```bash
@@ -280,11 +290,13 @@ The largest item. For scale, the Vulkan backend ([src/graphics/vulkan](../src/gr
 
 ### Plan
 
-- [ ] Native Dawn as an optional third-party dependency and `gpu_backend=webgpu`; the emdawnwebgpu port for wasm.
+- [x] Dawn as an optional dependency (`REXGLUE_USE_WEBGPU`, [cmake/dawn.cmake](../cmake/dawn.cmake)): natively the prebuilt release of the revision Emscripten's emdawnwebgpu port pins (v20260423.175430, Dawn `31e25af`), downloaded once into `out/deps` and checked against its SHA-256; in the browser the emdawnwebgpu port. The prebuilts are Dawn's unsigned GitHub nightlies for Linux x64, Windows x64 and macOS; elsewhere set `REXGLUE_DAWN_DIR` to a Dawn built from source at that revision. Moving to a newer emsdk means moving the pin with it.
+- [x] Device creation ([ui/webgpu/device.h](../include/rex/ui/webgpu/device.h)): the adapter's full limits and the optional features it has; asynchronous for the browser's device thread, blocking natively. `rexglue-webgpu-device` ([tests/webgpu](../tests/webgpu)) runs a compute shader over a 512 MB storage buffer and reads it back: passes natively on Dawn/Vulkan (RX 9070 XT: 4 GB buffers and bindings, all seven optional features). For wasm64 it builds against emdawnwebgpu and, under node, gets as far as reporting that `navigator.gpu` is missing, so memory64 and the port work together.
+- [ ] `gpu_backend=webgpu`, once there is a backend to select.
 - [ ] `src/ui/webgpu`: presenter, immediate drawer and ImGui, first natively on an SDL window surface.
 - [ ] Device thread and command batching, with the native build running it inline.
 - [ ] WGSL emitter: vertex and pixel shaders, then fetch (vertex and texture), then render target output, then memexport.
-- [ ] Internal shaders: offline SPIR-V to WGSL with Tint, checked in, with the conversion scripted.
+- [ ] Internal shaders: offline SPIR-V to WGSL with Tint (the `tint` in the Dawn prebuilt), checked in, with the conversion scripted. Tried on all 97: 89 convert. The 8 that don't are the gamma ramp shaders (`apply_gamma_*`), which read the ramp through a texel buffer, which WebGPU lacks; port those by hand with a storage buffer. 87 of the 89 turn push constants into `var<immediate>`, which only Chrome has shipped (149+, 64 bytes); the script should rewrite those as uniform buffer bindings.
 - [ ] `src/graphics/webgpu`: shared memory, primitive processor, texture cache, render target cache (host render targets only), pipeline cache, command processor.
 - [ ] Bring-up natively on Blade against Vulkan, then the browser (OffscreenCanvas on the device thread; phase 6 hosting).
 

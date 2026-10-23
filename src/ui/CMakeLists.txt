@@ -97,6 +97,10 @@ if(REXGLUE_USE_D3D12)
     list(APPEND REXUI_SOURCES ${REXUI_D3D12_SOURCES})
 endif()
 
+if(REXGLUE_USE_WEBGPU)
+    list(APPEND REXUI_SOURCES webgpu/webgpu_device.cpp)
+endif()
+
 add_library(rexui OBJECT ${REXUI_SOURCES})
 add_library(rex::ui ALIAS rexui)
 
@@ -118,6 +122,10 @@ target_link_libraries(rexui PUBLIC
     imgui::imgui
     SDL3::SDL3
 )
+if(REXGLUE_USE_WEBGPU)
+    target_link_libraries(rexui PUBLIC rex::webgpu)
+    target_compile_definitions(rexui PUBLIC REX_HAS_WEBGPU=1)
+endif()
 target_link_libraries(rexui PRIVATE utf8cpp)
 
 if(REXGLUE_FIDELITYFX_SOURCE_DIR AND EXISTS "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sdk/include")

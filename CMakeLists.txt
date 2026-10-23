@@ -43,6 +43,10 @@ else()
     option(REXGLUE_USE_VULKAN "Enable Vulkan graphics backend" ON)
 endif()
 
+# WebGPU: in progress (docs/WASM.md, phase 5). Natively it links Dawn, downloaded
+# prebuilt unless REXGLUE_DAWN_DIR names a Dawn install (cmake/dawn.cmake).
+option(REXGLUE_USE_WEBGPU "Enable the WebGPU graphics backend (in development)" OFF)
+
 if(NOT REXGLUE_USE_D3D12 AND NOT REXGLUE_USE_VULKAN)
     # The GPU plugin always contains the null backend, which needs no host GPU
     # API (WebAssembly bring-up, headless runs).
@@ -263,6 +267,9 @@ endif()
 
 # Third-party dependencies (vendored sources only)
 add_subdirectory(thirdparty)
+if(REXGLUE_USE_WEBGPU)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/dawn.cmake)
+endif()
 
 # Enable warnings after thirdparty
 add_compile_options(
@@ -280,6 +287,9 @@ add_subdirectory(src/audio)
 add_subdirectory(src/graphics)
 add_subdirectory(src/system)
 add_subdirectory(src/kernel)
+if(REXGLUE_USE_WEBGPU)
+    add_subdirectory(tests/webgpu)
+endif()
 # The recompiler and its CLI run on the host only; a WebAssembly build is the
 # runtime alone (generate code with a native SDK build).
 if(NOT EMSCRIPTEN)
@@ -317,7 +327,7 @@ message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSIO
 message(STATUS "  Configurations: ${CMAKE_CONFIGURATION_TYPES}")
 message(STATUS "  Output Dir: ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "  C++ Standard: C++${CMAKE_CXX_STANDARD}")
-message(STATUS "  Graphics: D3D12=${REXGLUE_USE_D3D12} Vulkan=${REXGLUE_USE_VULKAN} Null=ON")
+message(STATUS "  Graphics: D3D12=${REXGLUE_USE_D3D12} Vulkan=${REXGLUE_USE_VULKAN} WebGPU=${REXGLUE_USE_WEBGPU} Null=ON")
 message(STATUS "  FidelityFX: ${REXGLUE_ENABLE_FIDELITYFX}")
 message(STATUS "  Tracy: ${REXGLUE_ENABLE_TRACY}")
 message(STATUS "  Perf Counters: ${REXGLUE_ENABLE_PERF_COUNTERS}")

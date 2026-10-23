@@ -12,12 +12,17 @@
 // Links the runtime and the xenos GPU plugin the way a game does on wasm
 // (static, plugin whole-archive), creates the null GPU through the normal
 // plugin loader, and checks the guest memory layout: the aliased guest ranges
-// must reach the same host bytes (memory/guest_layout.h). Run with node.
+// must reach the same host bytes (memory/guest_layout.h), and floating point
+// that must match x86. Run with node.
 
+#include <cmath>
 #include <cstdio>
+#include <limits>
 
 #include <rex/cvar.h>
 #include <rex/platform.h>
+#include <rex/ppc/fpu.h>
+#include <rex/ppc/intrinsics.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/xmemory.h>
 
@@ -79,6 +84,54 @@ void CheckGuestMemory() {
         "virtual memory is separate from physical");
 }
 
+// Sets the guest rounding mode (FPSCR[RN]: 0 nearest, 1 toward zero, 2 up,
+// 3 down) the way generated code's mtfsf does.
+void SetGuestRounding(uint32_t mode) {
+  using Platform = rex::platform::FPSCRPlatform;
+  Platform::setcsr((Platform::getcsr() & ~Platform::RoundMaskVal) | Platform::GuestToHost[mode]);
+}
+
+// Wasm has no rounding control, so the FPU macros emulate FPSCR's directed
+// modes (ppc/fpu.h), and a few SIMDe fallbacks are replaced to match x86
+// (ppc/intrinsics.h). Each expected value is what x86 gives natively.
+void CheckFloatingPoint() {
+  volatile double tiny = 0x1p-60, one = 1.0, three = 3.0;
+
+  SetGuestRounding(0);
+  Check(REX_FADD(one, tiny) == 1.0, "fadd rounds to nearest by default");
+  SetGuestRounding(2);
+  Check(REX_FADD(one, tiny) == std::nextafter(1.0, 2.0), "fadd rounds up");
+  Check(REX_FDIV(one, three) == std::nextafter(1.0 / 3.0, 1.0), "fdiv rounds up");
+  Check(REX_FMUL(0x1p-600 * one, 0x1p-600 * one) == std::numeric_limits<double>::denorm_min(),
+        "fmul rounds an underflow up to the smallest denormal");
+  Check(REX_FMA(one, one, 0x1p-200 * one) == std::nextafter(1.0, 2.0), "fmadd rounds up");
+  Check(REX_FSINGLE(REX_FADD(one, 0x1p-40 * one)) == double(std::nextafter(1.0f, 2.0f)),
+        "single precision rounds up");
+  Check(REX_FCFID((int64_t(1) << 53) + 1 + int64_t(one) - 1) == 0x1p53 + 2, "fcfid rounds up");
+  SetGuestRounding(3);
+  Check(REX_FADD(one, -tiny) == std::nextafter(1.0, 0.0), "fadd rounds down");
+  Check(std::signbit(REX_FSUB(one, one)), "x - x is -0 when rounding down");
+  Check(REX_FMUL(1e308 * one, 10.0) == std::numeric_limits<double>::max(),
+        "fmul rounds a positive overflow down to the largest finite value");
+  SetGuestRounding(1);
+  Check(REX_FSUB(tiny, one) == std::nextafter(-1.0, 0.0), "fsub rounds toward zero");
+  SetGuestRounding(0);
+
+  // fctid: ties to even (SIMDe's fallback rounds them away from zero), and
+  // the guest's directed modes.
+  Check(simde_mm_cvtsd_si64(simde_mm_set_sd(2.5)) == 2, "fctid rounds ties to even");
+  Check(simde_mm_cvtsd_si32(simde_mm_set_sd(-3.5)) == -4, "fctiw rounds ties to even");
+  SetGuestRounding(2);
+  Check(simde_mm_cvtsd_si64(simde_mm_set_sd(2.25)) == 3, "fctid rounds up");
+  SetGuestRounding(0);
+
+  // vmsum4fp: dpps adds (p0 + p1) + (p2 + p3), here (1e8 + 1) + (-1e8 + 1) = 0
+  // in single precision; adding in sequence gives 1.
+  simde__m128 products = simde_mm_set_ps(1.0f, -1e8f, 1.0f, 1e8f);
+  Check(simde_mm_cvtss_f32(simde_mm_dp_ps(products, simde_mm_set1_ps(1.0f), 0xF1)) == 0.0f,
+        "dp_ps adds pairwise like dpps");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -88,6 +141,7 @@ int main(int argc, char** argv) {
   Check(graphics != nullptr, "null GPU created from the statically linked xenos plugin");
 
   CheckGuestMemory();
+  CheckFloatingPoint();
 
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;

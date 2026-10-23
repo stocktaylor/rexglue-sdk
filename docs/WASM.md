@@ -12,7 +12,7 @@ Last updated 2026-10-23, on the `wasm` branch.
 | --- | --- |
 | 1. Build plumbing and null GPU | Done |
 | 2. Platform layer | Milestone reached: Blade runs under node. Shutdown, executable path and fibers remain |
-| 3. Codegen wasm mode | Covered by the templates, but oversized functions make the wasm backend's compile time blow up (Crash) |
+| 3. Codegen wasm mode | Done for Blade: within V8's limits, and floating point matches native bit for bit. Oversized functions (Crash) remain |
 | 4. GPU write tracking | Not started |
 | 5. WebGPU backend | Not started |
 | 6. Packaging and hosting | Not started |
@@ -20,7 +20,7 @@ Last updated 2026-10-23, on the `wasm` branch.
 Where things stand:
 
 - The SDK (runtime, null GPU plugin, third-party libraries) builds for wasm64, and the smoke test passes under node (checked locally; CI not rechecked).
-- **Blade** (the 1888 dashboard, `../Blade`) builds for wasm64 in about 100 s on a 16-core x86-64 Linux machine (`blade.wasm` is 46 MB) and runs under node with the null GPU: kernel startup, XAM/XConfig/audio setup, then the dashboard at a steady 59 fps with the same 181 draws and 2081 vertices per frame as a native build of the same revision. The null GPU's wireframes match native to 99.3% of pixels; text runs come out a few pixels narrower on wasm, not yet explained.
+- **Blade** (the 1888 dashboard, `../Blade`) builds for wasm64 in about 100 s on a 16-core x86-64 Linux machine (`blade.wasm` is 46 MB) and runs under node with the null GPU: kernel startup, XAM/XConfig/audio setup, then the dashboard at a steady 59 fps with the same 181 draws and 2081 vertices per frame as a native build of the same revision. The null GPU's wireframes match native's (the remaining 0.08% of pixels is animation, as between two native frames), and emulating the guest's rounding modes costs about 1% of CPU time.
 - **Burnout Crash** (`../Crash`) compiles except its DLL module's oversized functions (see [Oversized functions](#oversized-functions)); it hasn't linked, so static DLL module registration is still untested.
 - Phase 2's milestone was moved to **node first** (headless, host filesystem) instead of a browser tab: it proves memory, threads and kernel startup without data import, COOP/COEP hosting or a canvas, which move to phase 6.
 
@@ -29,11 +29,10 @@ Where things stand:
 1. Shutdown: under node the process hangs after `Execution complete` instead of exiting (natively it aborts with exit 134 at the same point, so part of it isn't wasm-specific).
 2. `GetExecutablePath` reads `/proc/self/exe`, which Emscripten lacks, so the executable folder is empty: the default `<app>.toml` config and `logs/` folder resolve nowhere and file logging silently fails. Pass `--log_file` until it reports the `.js` file's folder.
 3. Oversized functions: build them at `-O0` on wasm (per file, without the PCH), then split them in codegen for good (phase 3). Then finish Crash's build and run it, the first test of static DLL module registration.
-4. Find why text runs are narrower on wasm than natively in Blade's wireframes (float rounding, or timing).
-5. Check CI on this branch. On `4df853d` the wasm64 build passed but the smoke test failed, most likely the `CLOCK_MONOTONIC_RAW` divide-by-zero fixed in `1035cae`.
-6. The lint job fails on 10 files that were unformatted before this branch: `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/graphics_system.cpp`, `src/graphics/pipeline/shader/dxbc_translator.cpp`, `src/graphics/pipeline/shader/dxbc_translator_memexport.cpp`, `src/graphics/pipeline/shader/spirv_translator_fetch.cpp`, `src/kernel/xam/xam_content.cpp`, `src/kernel/xam/xam_info.cpp`, `src/system/lzx.cpp`, `src/system/xam/content_manager.cpp`, `src/system/xsocket.cpp`. Running `clang-format -i` (version 20.1.8, `scripts/requirements-dev.txt`) on them fixes it.
-7. Choose JSPI or Asyncify for fibers once a title needs guest fibers.
-8. Send SDL the dummy audio memory64 fix (see [Audio](#audio)) so the overlay can go.
+4. Check CI on this branch. On `4df853d` the wasm64 build passed but the smoke test failed, most likely the `CLOCK_MONOTONIC_RAW` divide-by-zero fixed in `1035cae`.
+5. The lint job fails on 10 files that were unformatted before this branch: `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/graphics_system.cpp`, `src/graphics/pipeline/shader/dxbc_translator.cpp`, `src/graphics/pipeline/shader/dxbc_translator_memexport.cpp`, `src/graphics/pipeline/shader/spirv_translator_fetch.cpp`, `src/kernel/xam/xam_content.cpp`, `src/kernel/xam/xam_info.cpp`, `src/system/lzx.cpp`, `src/system/xam/content_manager.cpp`, `src/system/xsocket.cpp`. Running `clang-format -i` (version 20.1.8, `scripts/requirements-dev.txt`) on them fixes it.
+6. Choose JSPI or Asyncify for fibers once a title needs guest fibers.
+7. Send SDL the dummy audio memory64 fix (see [Audio](#audio)) so the overlay can go.
 
 ## Building
 
@@ -127,8 +126,21 @@ A static runtime also changes how projects override kernel exports. Natively, a 
 - Host apps link with `-sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=32 -sSTACK_SIZE=8MB -sEXIT_RUNTIME` ([rexglue_helpers.cmake](../cmake/rexglue_helpers.cmake)).
 - [threading_posix.cpp](../src/core/threading_posix.cpp): thread ids are numbered per thread, names go through `emscripten_set_thread_name`, affinity is a no-op, and user callbacks (APCs) wait for the target's next alertable wait slice, as there are no signals between threads.
 - [fiber_wasm.cpp](../src/core/fiber_wasm.cpp): threads can become fibers (every `XThread` does), but creating or switching to guest fibers logs an error and fails until JSPI or Asyncify is chosen.
-- FPSCR ([fpscr.h](../include/rex/platform/fpscr.h)) is emulated per thread with the MXCSR layout; nothing enforces rounding or flush-to-zero.
+- FPSCR ([fpscr.h](../include/rex/platform/fpscr.h)) is emulated per thread with the MXCSR layout. Its rounding mode is honored in software (see [Floating point](#floating-point)); flush-to-zero isn't.
 - The clock uses `CLOCK_MONOTONIC` with 1 GHz ticks (Emscripten has no `CLOCK_MONOTONIC_RAW`).
+
+### Floating point
+
+Natively, FPSCR's rounding mode is copied into the host's (MXCSR), which every scalar operation honors. Titles do switch it: Blade lays out text with round-up and round-down in effect, and without them its glyphs came out a few pixels narrower on wasm. Wasm has no rounding control, so:
+
+- Codegen emits scalar FPU arithmetic through macros ([fpu.h](../include/rex/ppc/fpu.h)): `REX_FADD`, `REX_FSUB`, `REX_FMUL`, `REX_FDIV`, `REX_FSQRT`, `REX_FMA`, `REX_FSINGLE` (single-precision results, `frsp`, `stfs`) and `REX_FCFID`. Natively they are the plain expressions codegen emitted before. On wasm, round-to-nearest is the plain expression after one check of the emulated mode; a directed mode takes the nearest result's exact error (TwoSum, a Dekker product on frexp-scaled mantissas, an exact expansion sign for fused multiply-add) and moves one ulp when the exact value lies on the rounding side. Signed zeros and overflow follow IEEE as x86 does.
+- `fctid`/`fctiw` call `simde_mm_cvtsd_si64`/`si32`, which [intrinsics.h](../include/rex/ppc/intrinsics.h) redirects on wasm to versions that round with the emulated mode; SIMDe's fallback used `round()`, which takes ties away from zero.
+- `vmsum4fp` calls `simde_mm_dp_ps`, redirected on wasm to add the products pairwise as `dpps` does; SIMDe's fallback added them in sequence.
+- VMX arithmetic rounds to nearest whatever FPSCR says, as on PPC (natively it follows MXCSR, which differs from PPC when a title sets a directed mode).
+
+Checked with differential tests run natively and under node over 200k to 300k inputs each (extremes, denormals, NaNs and halves included): the 65 SIMDe operations Blade uses, and the 12 scalar macro forms in all four rounding modes. All match bit for bit except `cvttsd_si64` at 2^63 and above, which generated code clamps first. The smoke test checks known cases of each.
+
+Projects regenerated with an older `rexglue` still build; their scalar arithmetic just doesn't see directed rounding on wasm.
 
 ### Audio
 
@@ -204,7 +216,7 @@ Codegen warns about functions over `max_file_size_bytes` (1 MB of C++). Crash's 
 - [x] File system under node: `NODERAWFS` reads the host filesystem directly. The browser (WASMFS with OPFS, data import) is phase 6.
 - [ ] Sockets ([socket_posix.cpp](../src/core/socket_posix.cpp)): compile against Emscripten's emulation; untested. Stub or proxy over WebSocket/WebRTC later.
 - [x] Dynamic libraries: nothing calls `dlopen` once plugins and modules are static.
-- [x] Floating point: FPSCR emulated, no flush-to-zero or rounding control.
+- [x] Floating point: FPSCR emulated; rounding modes honored in software (see [Floating point](#floating-point)), flush-to-zero not.
 - [ ] Debug and crash tooling (`dbg_posix.cpp`, `rex crash`, core dumps) has no wasm equivalent; disable it.
 
 - [ ] Executable path: `GetExecutablePath` reads `/proc/self/exe`; report the `.js` file's folder instead.
@@ -219,9 +231,11 @@ Codegen warns about functions over `max_file_size_bytes` (1 MB of C++). Crash's 
 - [x] No separate codegen mode needed so far: the templates branch on `REX_PLATFORM_WASM`, so the same generated code builds natively and for wasm.
 - [x] MMIO checks on every scalar load and store on wasm (template macros, not codegen).
 - [x] Memory macros in [pch_h.inja](../resources/templates/codegen/pch_h.inja) for the software alias translation.
-- [ ] SIMD: [intrinsics.h](../include/rex/ppc/intrinsics.h) goes through simde, which maps SSE4.1 to wasm SIMD128 with `-msimd128`. The vector shift helpers use their plain-SIMDe paths on wasm. Profile the AVX/AVX2 paths, which fall back to scalar code.
+- [x] SIMD: [intrinsics.h](../include/rex/ppc/intrinsics.h) goes through simde, which maps SSE4.1 to wasm SIMD128 with `-msimd128`. Of the AVX/AVX2 operations Blade uses, `permute_ps` is a single wasm shuffle; the variable shifts (`sllv_epi32` and the SDK's 8- and 16-bit helpers built on it) are a 4-lane loop, as natively on x86-64-v2, since wasm SIMD128 has no per-lane variable shift.
+- [x] Floating point bit-identical to native (see [Floating point](#floating-point)).
 - [ ] Oversized functions (see [Oversized functions](#oversized-functions)): build them at `-O0` on wasm as a stopgap, then split them in codegen, which also keeps them under V8's function body limit. Check locals per function and total functions too.
-- [ ] Measure module size, compile time and browser compile time on a large title (native executables are 35 MB+). Blade: 46 MB `.wasm`, about 100 s for a full build on 16 cores. Crash: blocked on oversized functions.
+- [x] Browser limits on Blade: largest function body 601 KB (V8's limit is 7.65 MB), at most 112 locals in a function (50,000), 22,119 functions (1,000,000).
+- [ ] Measure module size, compile time and browser compile time on a large title (native executables are 35 MB+). Blade: 46 MB `.wasm`, about 100 s for a full build on 16 cores; V8 compiles it in 0.36 s with Liftoff (11.5 s with TurboFan on all cores, 55 s on one), lazily per function by default. Crash: blocked on oversized functions.
 
 ## Phase 4: GPU write tracking
 

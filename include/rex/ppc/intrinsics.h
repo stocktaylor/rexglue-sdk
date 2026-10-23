@@ -26,6 +26,7 @@
 #include <arm_neon.h>
 #endif
 
+#include <rex/platform/fpscr.h>
 #include <rex/types.h>
 
 namespace rex::ppc {
@@ -393,7 +394,73 @@ inline simde__m128i simde_mm_sllv_epi8(simde__m128i a, simde__m128i count) {
   return simde_mm_packus_epi16(r_lo, r_hi);
 }
 
+#if defined(__wasm__)
+//=============================================================================
+// Rounding Conversions (wasm)
+//=============================================================================
+// fctid/fctiw generate simde_mm_cvtsd_si64/si32. On x86 those round with the
+// MXCSR rounding mode, which FPSCR keeps in step with the guest's (nearest-even
+// by default, as on PPC). SIMDe's portable versions use round(), which takes
+// halfway cases away from zero instead, so 2.5 converts to 3 rather than 2.
+// These round with the emulated rounding mode and return the x86 "integer
+// indefinite" value when out of range, as the native instructions do.
+namespace detail {
+
+inline double RoundWithGuestMode(double v) {
+  switch (rex::platform::FPSCRPlatform::getcsr() & rex::platform::FPSCRPlatform::RoundMaskVal) {
+    case SIMDE_MM_ROUND_TOWARD_ZERO:
+      return std::trunc(v);
+    case SIMDE_MM_ROUND_UP:
+      return std::ceil(v);
+    case SIMDE_MM_ROUND_DOWN:
+      return std::floor(v);
+    default:
+      return std::nearbyint(v);  // f64.nearest: ties to even
+  }
+}
+
+inline int64_t CvtsdSi64(simde__m128d a) {
+  double v = RoundWithGuestMode(simde_mm_cvtsd_f64(a));
+  return (v >= -0x1p63 && v < 0x1p63) ? static_cast<int64_t>(v) : INT64_MIN;
+}
+
+inline int32_t CvtsdSi32(simde__m128d a) {
+  double v = RoundWithGuestMode(simde_mm_cvtsd_f64(a));
+  return (v >= -0x1p31 && v < 0x1p31) ? static_cast<int32_t>(v) : INT32_MIN;
+}
+
+// dpps sums the selected products pairwise, (p0 + p1) + (p2 + p3), with +0.0
+// for unselected lanes. SIMDe's portable dp_ps adds them in sequence onto
+// +0.0, which rounds differently and loses the sign of an all -0.0 sum, so
+// vmsum4fp (and the transforms built on it) drift from native.
+inline simde__m128 DpPs(simde__m128 a, simde__m128 b, int imm8) {
+  const simde__m128i lanes = simde_mm_set_epi32(8, 4, 2, 1);
+  const simde__m128 select = simde_mm_castsi128_ps(
+      simde_mm_cmpeq_epi32(simde_mm_and_si128(simde_mm_set1_epi32(imm8 >> 4), lanes), lanes));
+  const simde__m128 store = simde_mm_castsi128_ps(
+      simde_mm_cmpeq_epi32(simde_mm_and_si128(simde_mm_set1_epi32(imm8), lanes), lanes));
+  simde__m128 p = simde_mm_and_ps(simde_mm_mul_ps(a, b), select);
+  // [p0+p1, p1+p0, p2+p3, p3+p2], then each lane plus the other pair's sum.
+  // Lane 0 adds in dpps's operand order, which decides which NaN propagates,
+  // so it is the one broadcast.
+  p = simde_mm_add_ps(p, simde_mm_shuffle_ps(p, p, SIMDE_MM_SHUFFLE(2, 3, 0, 1)));
+  p = simde_mm_add_ps(p, simde_mm_shuffle_ps(p, p, SIMDE_MM_SHUFFLE(1, 0, 3, 2)));
+  p = simde_mm_shuffle_ps(p, p, SIMDE_MM_SHUFFLE(0, 0, 0, 0));
+  return simde_mm_and_ps(p, store);
+}
+
+}  // namespace detail
+#endif
+
 }  // namespace rex::ppc
+
+#if defined(__wasm__)
+// Generated code calls these by SIMDe's names; SIMDe's own headers are already
+// included above, so only callers see the redirect.
+#define simde_mm_cvtsd_si64(a) ::rex::ppc::detail::CvtsdSi64(a)
+#define simde_mm_cvtsd_si32(a) ::rex::ppc::detail::CvtsdSi32(a)
+#define simde_mm_dp_ps(a, b, imm8) ::rex::ppc::detail::DpPs(a, b, imm8)
+#endif
 
 //=============================================================================
 // Global Aliases for Generated Code

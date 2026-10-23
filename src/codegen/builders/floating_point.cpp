@@ -51,7 +51,7 @@ bool build_fmr(BuilderContext& ctx) {
 
 bool build_fcfid(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double({}.s64);", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FCFID({}.s64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]));
   return true;
 }
@@ -98,7 +98,7 @@ bool build_fctiwz(BuilderContext& ctx) {
 
 bool build_frsp(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float({}.f64));", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FSINGLE({}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]));
   return true;
 }
@@ -127,14 +127,14 @@ bool build_fcmpo(BuilderContext& ctx) {
 
 bool build_fadd(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = {}.f64 + {}.f64;", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FADD({}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]));
   return true;
 }
 
 bool build_fadds(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float({}.f64 + {}.f64));", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FSINGLE(REX_FADD({}.f64, {}.f64));", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]));
   return true;
 }
@@ -145,14 +145,14 @@ bool build_fadds(BuilderContext& ctx) {
 
 bool build_fsub(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = {}.f64 - {}.f64;", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FSUB({}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]));
   return true;
 }
 
 bool build_fsubs(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float({}.f64 - {}.f64));", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FSINGLE(REX_FSUB({}.f64, {}.f64));", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]));
   return true;
 }
@@ -163,14 +163,14 @@ bool build_fsubs(BuilderContext& ctx) {
 
 bool build_fmul(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = {}.f64 * {}.f64;", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FMUL({}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]));
   return true;
 }
 
 bool build_fmuls(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float({}.f64 * {}.f64));", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FSINGLE(REX_FMUL({}.f64, {}.f64));", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]));
   return true;
 }
@@ -181,14 +181,14 @@ bool build_fmuls(BuilderContext& ctx) {
 
 bool build_fdiv(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = {}.f64 / {}.f64;", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FDIV({}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]));
   return true;
 }
 
 bool build_fdivs(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float({}.f64 / {}.f64));", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FSINGLE(REX_FDIV({}.f64, {}.f64));", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]));
   return true;
 }
@@ -199,7 +199,7 @@ bool build_fdivs(BuilderContext& ctx) {
 
 bool build_fmadd(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = std::fma({}.f64, {}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FMA({}.f64, {}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
   return true;
@@ -207,7 +207,7 @@ bool build_fmadd(BuilderContext& ctx) {
 
 bool build_fmadds(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float(std::fma({}.f64, {}.f64, {}.f64)));",
+  ctx.println("\t{}.f64 = REX_FSINGLE(REX_FMA({}.f64, {}.f64, {}.f64));",
               ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
   return true;
@@ -215,7 +215,7 @@ bool build_fmadds(BuilderContext& ctx) {
 
 bool build_fmsub(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = std::fma({}.f64, {}.f64, -{}.f64);", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FMA({}.f64, {}.f64, -{}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
   return true;
@@ -223,7 +223,7 @@ bool build_fmsub(BuilderContext& ctx) {
 
 bool build_fmsubs(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float(std::fma({}.f64, {}.f64, -{}.f64)));",
+  ctx.println("\t{}.f64 = REX_FSINGLE(REX_FMA({}.f64, {}.f64, -{}.f64));",
               ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
   return true;
@@ -231,7 +231,7 @@ bool build_fmsubs(BuilderContext& ctx) {
 
 bool build_fnmadd(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = -std::fma({}.f64, {}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = -REX_FMA({}.f64, {}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
   return true;
@@ -239,7 +239,7 @@ bool build_fnmadd(BuilderContext& ctx) {
 
 bool build_fnmadds(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float(-std::fma({}.f64, {}.f64, {}.f64)));",
+  ctx.println("\t{}.f64 = REX_FSINGLE(-REX_FMA({}.f64, {}.f64, {}.f64));",
               ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
   return true;
@@ -247,7 +247,7 @@ bool build_fnmadds(BuilderContext& ctx) {
 
 bool build_fnmsub(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = -std::fma({}.f64, {}.f64, -{}.f64);", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = -REX_FMA({}.f64, {}.f64, -{}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
   return true;
@@ -255,7 +255,7 @@ bool build_fnmsub(BuilderContext& ctx) {
 
 bool build_fnmsubs(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float(-std::fma({}.f64, {}.f64, -{}.f64)));",
+  ctx.println("\t{}.f64 = REX_FSINGLE(-REX_FMA({}.f64, {}.f64, -{}.f64));",
               ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
   return true;
@@ -267,27 +267,28 @@ bool build_fnmsubs(BuilderContext& ctx) {
 
 bool build_fres(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float(1.0 / {}.f64));", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FSINGLE(REX_FDIV(1.0, {}.f64));", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]));
   return true;
 }
 
 bool build_frsqrte(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float(1.0 / sqrt({}.f64)));", ctx.f(ctx.insn.operands[0]),
-              ctx.f(ctx.insn.operands[1]));
+  ctx.println("\t{}.f64 = REX_FSINGLE(REX_FDIV(1.0, REX_FSQRT({}.f64)));",
+              ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]));
   return true;
 }
 
 bool build_fsqrt(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = sqrt({}.f64);", ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]));
+  ctx.println("\t{}.f64 = REX_FSQRT({}.f64);", ctx.f(ctx.insn.operands[0]),
+              ctx.f(ctx.insn.operands[1]));
   return true;
 }
 
 bool build_fsqrts(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
-  ctx.println("\t{}.f64 = double(float(sqrt({}.f64)));", ctx.f(ctx.insn.operands[0]),
+  ctx.println("\t{}.f64 = REX_FSINGLE(REX_FSQRT({}.f64));", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]));
   return true;
 }

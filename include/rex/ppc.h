@@ -15,6 +15,7 @@
 #include <rex/types.h>
 
 #include <rex/ppc/context.h>
+#include <rex/ppc/fpu.h>
 #include <rex/ppc/function.h>
 #include <rex/ppc/intrinsics.h>
 #include <rex/ppc/stack.h>

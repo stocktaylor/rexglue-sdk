@@ -39,6 +39,12 @@ constexpr WGPUFeatureName kOptionalFeatures[] = {
     WGPUFeatureName_Float32Blendable,      //
     WGPUFeatureName_TextureCompressionBC,  // DXT textures without decompressing
     WGPUFeatureName_PrimitiveIndex,        //
+#if !defined(__EMSCRIPTEN__)
+    // Dawn native: lets the UI thread (painting) and the GPU thread (guest
+    // output, emulation) share the device. In the browser every call goes
+    // through the device thread instead.
+    WGPUFeatureName_ImplicitDeviceSynchronization,
+#endif
 };
 
 }  // namespace

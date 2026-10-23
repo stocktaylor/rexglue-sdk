@@ -16,6 +16,10 @@ set(REXGLUE_DAWN_REVISION "31e25af254ab572c77054edec4946d2244e184dd")
 
 set(REXGLUE_DAWN_DIR "" CACHE PATH
     "Install prefix of a Dawn build to use instead of downloading the pinned release")
+# The prebuilt Linux release leaves out Wayland surfaces (DAWN_USE_WAYLAND is off
+# by default), so on Linux windows must be X11 (XWayland on a Wayland desktop,
+# --video_driver=x11). Turn on for a Dawn built with DAWN_USE_WAYLAND.
+option(REXGLUE_DAWN_WAYLAND "The Dawn in use supports Wayland surfaces" OFF)
 
 add_library(rex_webgpu INTERFACE)
 add_library(rex::webgpu ALIAS rex_webgpu)
@@ -73,4 +77,7 @@ endif()
 find_package(Threads REQUIRED)
 find_package(Dawn CONFIG REQUIRED PATHS "${REXGLUE_DAWN_DIR}" NO_DEFAULT_PATH)
 target_link_libraries(rex_webgpu INTERFACE dawn::webgpu_dawn)
+if(REXGLUE_DAWN_WAYLAND)
+    target_compile_definitions(rex_webgpu INTERFACE REX_DAWN_HAS_WAYLAND=1)
+endif()
 message(STATUS "Dawn: ${REXGLUE_DAWN_DIR}")

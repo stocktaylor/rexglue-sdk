@@ -432,7 +432,7 @@ std::unique_ptr<Surface> WindowSDL::CreateSurfaceImpl(Surface::TypeFlags allowed
     auto x11_window = static_cast<xcb_window_t>(
         SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
     if (display && x11_window) {
-      return std::make_unique<XcbWindowSurface>(XGetXCBConnection(display), x11_window);
+      return std::make_unique<XcbWindowSurface>(XGetXCBConnection(display), x11_window, display);
     }
   }
 #endif

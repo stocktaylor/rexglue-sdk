@@ -23,11 +23,15 @@ namespace ui {
 
 class XcbWindowSurface final : public Surface {
  public:
-  explicit XcbWindowSurface(xcb_connection_t* connection, xcb_window_t window)
-      : connection_(connection), window_(window) {}
+  // xlib_display, the Xlib Display* the connection belongs to, is for APIs
+  // that take Xlib windows rather than XCB ones (Dawn).
+  explicit XcbWindowSurface(xcb_connection_t* connection, xcb_window_t window,
+                            void* xlib_display = nullptr)
+      : connection_(connection), window_(window), xlib_display_(xlib_display) {}
   TypeIndex GetType() const override { return kTypeIndex_XcbWindow; }
   xcb_connection_t* connection() const { return connection_; }
   xcb_window_t window() const { return window_; }
+  void* xlib_display() const { return xlib_display_; }
 
  protected:
   bool GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const override;
@@ -35,6 +39,7 @@ class XcbWindowSurface final : public Surface {
  private:
   xcb_connection_t* connection_;
   xcb_window_t window_;
+  void* xlib_display_;
 };
 
 class WaylandSurface final : public Surface {

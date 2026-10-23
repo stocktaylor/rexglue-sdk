@@ -98,7 +98,12 @@ if(REXGLUE_USE_D3D12)
 endif()
 
 if(REXGLUE_USE_WEBGPU)
-    list(APPEND REXUI_SOURCES webgpu/webgpu_device.cpp)
+    list(APPEND REXUI_SOURCES
+        webgpu/webgpu_device.cpp
+        webgpu/webgpu_immediate_drawer.cpp
+        webgpu/webgpu_presenter.cpp
+        webgpu/webgpu_provider.cpp
+    )
 endif()
 
 add_library(rexui OBJECT ${REXUI_SOURCES})

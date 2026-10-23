@@ -2,6 +2,9 @@
 #   rexglue-webgpu-device: starts the device thread and, through it, runs a
 #     compute shader over a 512 MB buffer; in the browser also clears the canvas
 #     the thread owns. Same code natively and in the browser (emrun).
+#   rexglue-webgpu-shaders: compiles every converted internal WGSL shader
+#     (src/graphics/shaders/webgpu_wgsl) on the device, compute shaders into
+#     pipelines. Natively and in the browser (emrun).
 #   rexglue-webgpu-presenter: a window drawn by WebGPUPresenter and the WebGPU
 #     immediate drawer (ImGui) for a few seconds; saves a presented frame and
 #     the guest output as BMPs in the working directory. Native only.
@@ -18,6 +21,18 @@ if(EMSCRIPTEN)
         -sPROXY_TO_PTHREAD -sOFFSCREENCANVAS_SUPPORT -sEXIT_RUNTIME --emrun
         -sENVIRONMENT=web,worker)
     set_target_properties(rexglue-webgpu-device PROPERTIES SUFFIX ".html")
+endif()
+
+add_executable(rexglue-webgpu-shaders
+    shaders_test.cpp
+    ${REXGLUE_ROOT}/src/ui/webgpu/webgpu_device.cpp
+    ${REXGLUE_ROOT}/src/ui/webgpu/webgpu_device_thread.cpp
+)
+target_link_libraries(rexglue-webgpu-shaders PRIVATE rexcore rex::webgpu)
+if(EMSCRIPTEN)
+    target_link_options(rexglue-webgpu-shaders PRIVATE
+        -sPROXY_TO_PTHREAD -sEXIT_RUNTIME --emrun -sENVIRONMENT=web,worker)
+    set_target_properties(rexglue-webgpu-shaders PROPERTIES SUFFIX ".html")
 endif()
 
 if(NOT EMSCRIPTEN)

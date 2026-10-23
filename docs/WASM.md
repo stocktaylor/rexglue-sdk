@@ -6,30 +6,34 @@ Emscripten is Clang-based, so the existing Clang 18+ and C++23 requirements hold
 
 ## Status
 
-Last updated 2026-10-18, on the `wasm` branch at `1035cae`.
+Last updated 2026-10-23, on the `wasm` branch.
 
 | Phase | State |
 | --- | --- |
 | 1. Build plumbing and null GPU | Done |
-| 2. Platform layer | Memory, faults, threads, clock and node hosting done; fibers partial; the first run of a real title is next |
-| 3. Codegen wasm mode | Mostly covered by the templates; size limits not measured yet |
+| 2. Platform layer | Milestone reached: Blade runs under node. Shutdown, executable path and fibers remain |
+| 3. Codegen wasm mode | Covered by the templates, but oversized functions make the wasm backend's compile time blow up (Crash) |
 | 4. GPU write tracking | Not started |
 | 5. WebGPU backend | Not started |
 | 6. Packaging and hosting | Not started |
 
 Where things stand:
 
-- The SDK (runtime, null GPU plugin, third-party libraries) builds for wasm64, and the smoke test passes under node.
-- Burnout Crash (`../Crash`) has been regenerated with the current templates. Its main executable's generated code and the SDK compile for wasm64, but the build never finished on Windows ARM64: the last 6 objects (the DLL module's biggest generated files) were still compiling after hours under the x64-emulated toolchain. Nothing has run under node yet.
+- The SDK (runtime, null GPU plugin, third-party libraries) builds for wasm64, and the smoke test passes under node (checked locally; CI not rechecked).
+- **Blade** (the 1888 dashboard, `../Blade`) builds for wasm64 in about 100 s on a 16-core x86-64 Linux machine (`blade.wasm` is 46 MB) and runs under node with the null GPU: kernel startup, XAM/XConfig/audio setup, then the dashboard at a steady 59 fps with the same 181 draws and 2081 vertices per frame as a native build of the same revision. The null GPU's wireframes match native to 99.3% of pixels; text runs come out a few pixels narrower on wasm, not yet explained.
+- **Burnout Crash** (`../Crash`) compiles except its DLL module's oversized functions (see [Oversized functions](#oversized-functions)); it hasn't linked, so static DLL module registration is still untested.
 - Phase 2's milestone was moved to **node first** (headless, host filesystem) instead of a browser tab: it proves memory, threads and kernel startup without data import, COOP/COEP hosting or a canvas, which move to phase 6.
 
 ### Next steps
 
-1. Finish the Crash wasm build on an x86-64 machine, preferably Linux (see [Building](#building)).
-2. Run it under node and fix what stops it before kernel startup (registering `dll/crash.dll.xex` and on). This is also the first test of static DLL module registration.
-3. Check CI on `1035cae`. On `4df853d` the wasm64 build passed but the smoke test failed, most likely the `CLOCK_MONOTONIC_RAW` divide-by-zero fixed in `1035cae`.
-4. The lint job fails on 10 files that were unformatted before this branch: `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/graphics_system.cpp`, `src/graphics/pipeline/shader/dxbc_translator.cpp`, `src/graphics/pipeline/shader/dxbc_translator_memexport.cpp`, `src/graphics/pipeline/shader/spirv_translator_fetch.cpp`, `src/kernel/xam/xam_content.cpp`, `src/kernel/xam/xam_info.cpp`, `src/system/lzx.cpp`, `src/system/xam/content_manager.cpp`, `src/system/xsocket.cpp`. Running `clang-format -i` (version 20.1.8, `scripts/requirements-dev.txt`) on them fixes it.
-5. Choose JSPI or Asyncify for fibers once a title needs guest fibers.
+1. Shutdown: under node the process hangs after `Execution complete` instead of exiting (natively it aborts with exit 134 at the same point, so part of it isn't wasm-specific).
+2. `GetExecutablePath` reads `/proc/self/exe`, which Emscripten lacks, so the executable folder is empty: the default `<app>.toml` config and `logs/` folder resolve nowhere and file logging silently fails. Pass `--log_file` until it reports the `.js` file's folder.
+3. Oversized functions: build them at `-O0` on wasm (per file, without the PCH), then split them in codegen for good (phase 3). Then finish Crash's build and run it, the first test of static DLL module registration.
+4. Find why text runs are narrower on wasm than natively in Blade's wireframes (float rounding, or timing).
+5. Check CI on this branch. On `4df853d` the wasm64 build passed but the smoke test failed, most likely the `CLOCK_MONOTONIC_RAW` divide-by-zero fixed in `1035cae`.
+6. The lint job fails on 10 files that were unformatted before this branch: `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/graphics_system.cpp`, `src/graphics/pipeline/shader/dxbc_translator.cpp`, `src/graphics/pipeline/shader/dxbc_translator_memexport.cpp`, `src/graphics/pipeline/shader/spirv_translator_fetch.cpp`, `src/kernel/xam/xam_content.cpp`, `src/kernel/xam/xam_info.cpp`, `src/system/lzx.cpp`, `src/system/xam/content_manager.cpp`, `src/system/xsocket.cpp`. Running `clang-format -i` (version 20.1.8, `scripts/requirements-dev.txt`) on them fixes it.
+7. Choose JSPI or Asyncify for fibers once a title needs guest fibers.
+8. Send SDL the dummy audio memory64 fix (see [Audio](#audio)) so the overlay can go.
 
 ## Building
 
@@ -46,6 +50,8 @@ source emsdk/emsdk_env.sh     # emsdk_env.bat / emsdk_env.ps1 on Windows
 
 emsdk has no Windows ARM64 binaries: set `EMSDK_ARCH=x86_64` before every emsdk command to use the x64 ones under emulation. That works for the SDK but is far too slow for a game's generated code; use an x86-64 machine (or Linux ARM64) for games. CMake 3.25+ and Ninja are needed as usual.
 
+Run wasm64 output with node 24 or newer, such as the one emsdk installs (`emsdk/node/24.*/bin/node`); `emsdk_env` leaves a system node first on `PATH`, and node 22 doesn't enable memory64 by default.
+
 ### The SDK
 
 ```bash
@@ -60,28 +66,34 @@ The smoke test ([tests/wasm](../tests/wasm)) creates the null GPU through the st
 
 A game consumes the SDK in-tree (`REXSDK_DIR`); a packaged wasm SDK doesn't exist yet. Codegen still runs during the build, through a native `rexglue` built from the same SDK revision (found on `PATH`, or `REXGLUE_HOST_REXGLUE`). Regenerate once with it first if the templates changed (`rexglue codegen <game>_manifest.toml` in the game folder).
 
-The game's own presets don't know about wasm, so configure by hand (shown for Crash; adjust paths):
+The game's own presets don't know about wasm, so configure by hand (shown for Blade; adjust paths):
 
 ```bash
 FLAGS="-sMEMORY64 -pthread -msimd128 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm"
-cmake -S Crash -B Crash/out/build/wasm64 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+cmake -S Blade -B Blade/out/build/wasm64 -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake" \
   -DEMSCRIPTEN_SYSTEM_PROCESSOR=wasm64 \
   -DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_CXX_FLAGS="$FLAGS" -DCMAKE_EXE_LINKER_FLAGS="$FLAGS" \
   -DREXSDK_DIR=/path/to/rexglue-sdk \
   -DREXGLUE_HOST_REXGLUE=/path/to/native/rexglue \
+  -DBLADE_LAUNCHER=OFF \
   -DREXGLUE_USE_VULKAN=OFF -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_ENABLE_FIDELITYFX=OFF
-cmake --build Crash/out/build/wasm64 --parallel
+cmake --build Blade/out/build/wasm64 --parallel
 ```
+
+`BLADE_LAUNCHER=OFF` builds the stock dashboard: launcher mode starts other titles with `fork`/`execv`, which Emscripten only stubs. Crash configures the same way, without that option.
 
 ### Running under node
 
 ```bash
-node crash.js --gpu_plugin=xenos --gpu_backend=null --video_driver=dummy \
-  --launcher_menu=false --game_data_root=/path/to/Crash/game --log_level=debug
+node blade.js --gpu_plugin=xenos --gpu_backend=null --video_driver=dummy \
+  --game_data_root=/path/to/Blade/assets --log_level=debug \
+  --log_file=/path/to/blade.log --null_gpu_sample_dump_dir=/path/to/frames
 ```
 
-Untested so far. `REXGLUE_WASM_NODE` (on by default) links host apps with `-sENVIRONMENT=node -sNODERAWFS`, so the game folder is read straight from the host filesystem; Windows-style paths are untested under it. `null_gpu_sample_dump_dir=<dir>` writes the null GPU's 1 Hz wireframe frames as BMPs. Audio falls back to nothing if SDL finds no device.
+`REXGLUE_WASM_NODE` (on by default) links host apps with `-sENVIRONMENT=node -sNODERAWFS`, so the game folder is read straight from the host filesystem; Windows-style paths are untested under it. As natively, the console only shows startup and everything after goes to the log file; give `--log_file` explicitly (next step 2). `null_gpu_sample_dump_dir=<dir>` writes the null GPU's 1 Hz wireframe frames as BMPs. With no audio device, audio runs on SDL's dummy driver (see [Audio](#audio)).
+
+To compare against native, build the same revision natively with the SDK in-tree and run it with `--gpu_backend=null --video_driver=offscreen` (native SDL has no dummy video driver).
 
 ## Design notes
 
@@ -108,6 +120,8 @@ Nothing faults on wasm. [exception_handler_wasm.cpp](../src/core/exception_handl
 
 `rexruntime` and GPU plugins build as static libraries (`REX_SHARED_LIBRARY_TYPE`). The xenos plugin registers itself at startup (`RegisterStaticGpuPlugin`, [plugin_main.cpp](../src/graphics/plugin_main.cpp)) and `rexglue_configure_target` links it whole-archive. Generated DLL modules become static libraries ([dll_targets_cmake.inja](../resources/templates/codegen/dll_targets_cmake.inja)) whose registration functions are `static` and that call `RegisterStaticModule` ([register_cpp.inja](../resources/templates/codegen/register_cpp.inja)); `KernelState::LoadUserModule` looks modules up by image base before trying `dlopen`, on every platform. Not yet exercised by a real module.
 
+A static runtime also changes how projects override kernel exports. Natively, a project's `REX_HOOK` of an export (Blade replaces `ExGetXConfigSetting`, `ExSetXConfigSetting` and `VdSetDisplayModeOverride`) takes precedence over `rexruntime`'s shared-library definition. On wasm, `REX_EXPORT*` definitions are weak ([hook.h](../include/rex/hook.h)), so the project's strong definition wins the link, and the export registrar's `&name` resolves to it too.
+
 ### Threads, fibers, time
 
 - Host apps link with `-sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=32 -sSTACK_SIZE=8MB -sEXIT_RUNTIME` ([rexglue_helpers.cmake](../cmake/rexglue_helpers.cmake)).
@@ -115,6 +129,24 @@ Nothing faults on wasm. [exception_handler_wasm.cpp](../src/core/exception_handl
 - [fiber_wasm.cpp](../src/core/fiber_wasm.cpp): threads can become fibers (every `XThread` does), but creating or switching to guest fibers logs an error and fails until JSPI or Asyncify is chosen.
 - FPSCR ([fpscr.h](../include/rex/platform/fpscr.h)) is emulated per thread with the MXCSR layout; nothing enforces rounding or flush-to-zero.
 - The clock uses `CLOCK_MONOTONIC` with 1 GHz ticks (Emscripten has no `CLOCK_MONOTONIC_RAW`).
+
+### Audio
+
+Titles treat a failed XAudio client registration as fatal (Blade exits with `XAPI RETURN VALUE` 0x80300004, natively too), and node has no audio device. When SDL can't initialize audio, [sdl_audio_driver.cpp](../src/audio/sdl/sdl_audio_driver.cpp) retries with SDL's dummy driver, which consumes frames in real time. Only builds that include it have it (wasm does; native doesn't).
+
+On Emscripten, SDL's dummy driver drives its timer from JS with `dynCall('vi', ...)`, passing the device pointer as an i32, which throws under memory64 ("Cannot convert ... to a BigInt"). [thirdparty/CMakeLists.txt](../thirdparty/CMakeLists.txt) builds a copy of `SDL_dummyaudio.c` with `'vp'` in its place, leaving the submodule untouched, and warns if SDL changes that line.
+
+### Oversized functions
+
+Codegen warns about functions over `max_file_size_bytes` (1 MB of C++). Crash's DLL module has six, of 1.3 to 5.4 MB. Natively they compile normally; for wasm at `-O3` some take hours. Stack samples show two causes: `WebAssemblyRegStackify`, a wasm backend pass that is quadratic here (`LiveIntervals::shrinkToUses`), and the mid-level optimizer (loop vectorizer, load elimination). Timings for `crash_recomp.81.cpp` (1.3 MB, one function) on a 16-core x86-64 machine:
+
+| Level | Compile time | Wasm code for the function |
+| --- | --- | --- |
+| `-O0` | 3 s | 0.6 MB |
+| `-O1` | 49 min | 1.65 MB |
+| `-O3` | 41 min | 1.53 MB |
+
+`crash_recomp.207.cpp` (3.4 MB) was still in the mid-level optimizer after more than 2 hours of CPU time. RegStackify runs at every level above `-O0`, so `-O1` is no fix. At `-O3` the wasm code is about 1.2 times the C++ size, which puts the 5.4 MB function near V8's 7.65 MB limit on a function body. The `-O0` output is smaller, likely because the per-access MMIO check isn't inlined. A per-file `-O0` on wasm needs those files built without the precompiled header, which is built at `-O3` and which Clang refuses to mix with another level (it finds `<header>.pch` even through a plain `-include`).
 
 ### Build specifics
 
@@ -140,7 +172,7 @@ Nothing faults on wasm. [exception_handler_wasm.cpp](../src/core/exception_handl
 - [x] Null graphics backend (`gpu_backend=null`), with a 1 Hz CPU wireframe view and a software presenter; CMake accepts builds with no host GPU API.
 - [x] GPU plugins register statically.
 - [x] Recompiled DLL modules link into the executable and register statically (untested with a real module).
-- [x] Third-party libraries build for wasm: SDL3 (with dummy video/audio for headless runs), FFmpeg/libavcodec, fmt, spdlog, imgui, xxHash, toml++, simde.
+- [x] Third-party libraries build for wasm: SDL3 (with dummy video/audio for headless runs; see [Audio](#audio)), FFmpeg/libavcodec, fmt, spdlog, imgui, xxHash, toml++, simde.
 - [x] CI job that builds the preset and runs the smoke test under node ([build-wasm64.yaml](../.github/workflows/build-wasm64.yaml)).
 
 ## Phase 2: Platform layer
@@ -175,7 +207,12 @@ Nothing faults on wasm. [exception_handler_wasm.cpp](../src/core/exception_handl
 - [x] Floating point: FPSCR emulated, no flush-to-zero or rounding control.
 - [ ] Debug and crash tooling (`dbg_posix.cpp`, `rex crash`, core dumps) has no wasm equivalent; disable it.
 
-**Milestone:** a recompiled title boots under node with the null GPU and logs through kernel startup. Not reached yet: see [Next steps](#next-steps).
+- [ ] Executable path: `GetExecutablePath` reads `/proc/self/exe`; report the `.js` file's folder instead.
+- [ ] Shutdown: exit once the title terminates instead of hanging.
+- [x] Audio with no device: SDL's dummy driver (see [Audio](#audio)).
+- [x] Projects' hooks of kernel exports win the static link (see [No dynamic loading](#no-dynamic-loading)).
+
+**Milestone:** a recompiled title boots under node with the null GPU and logs through kernel startup. **Reached 2026-10-23 with Blade**, which runs on to the dashboard at 59 fps with the same draws as native.
 
 ## Phase 3: Codegen wasm mode
 
@@ -183,8 +220,8 @@ Nothing faults on wasm. [exception_handler_wasm.cpp](../src/core/exception_handl
 - [x] MMIO checks on every scalar load and store on wasm (template macros, not codegen).
 - [x] Memory macros in [pch_h.inja](../resources/templates/codegen/pch_h.inja) for the software alias translation.
 - [ ] SIMD: [intrinsics.h](../include/rex/ppc/intrinsics.h) goes through simde, which maps SSE4.1 to wasm SIMD128 with `-msimd128`. The vector shift helpers use their plain-SIMDe paths on wasm. Profile the AVX/AVX2 paths, which fall back to scalar code.
-- [ ] Check generated functions against browser limits (function body size, locals per function, total functions) and split oversized functions in wasm mode.
-- [ ] Measure module size, compile time and browser compile time on a large title (native executables are 35 MB+). Compiling Crash's DLL module was impractically slow under the x64-emulated toolchain on Windows ARM64.
+- [ ] Oversized functions (see [Oversized functions](#oversized-functions)): build them at `-O0` on wasm as a stopgap, then split them in codegen, which also keeps them under V8's function body limit. Check locals per function and total functions too.
+- [ ] Measure module size, compile time and browser compile time on a large title (native executables are 35 MB+). Blade: 46 MB `.wasm`, about 100 s for a full build on 16 cores. Crash: blocked on oversized functions.
 
 ## Phase 4: GPU write tracking
 

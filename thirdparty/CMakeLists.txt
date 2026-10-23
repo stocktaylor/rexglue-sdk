@@ -311,6 +311,33 @@ endif()
 
 add_subdirectory(sdl3)
 
+# SDL's dummy audio driver drives its Emscripten timer with dynCall('vi', ...),
+# passing the device pointer as an i32, which throws under memory64 ("Cannot
+# convert ... to a BigInt"). Build a copy with the pointer signature ('vp')
+# instead, leaving the submodule untouched. The copy keeps the original's
+# relative includes resolving through the original's directory.
+if(EMSCRIPTEN AND SDL_DUMMYAUDIO)
+    set(_sdl_dummy_src "${CMAKE_CURRENT_SOURCE_DIR}/sdl3/src/audio/dummy/SDL_dummyaudio.c")
+    set(_sdl_dummy_fixed "${CMAKE_CURRENT_BINARY_DIR}/sdl3-overlay/src/audio/dummy/SDL_dummyaudio.c")
+    file(READ "${_sdl_dummy_src}" _sdl_dummy_code)
+    string(FIND "${_sdl_dummy_code}" "dynCall('vi', $3, [$4])" _sdl_dummy_pos)
+    if(_sdl_dummy_pos EQUAL -1)
+        message(WARNING "SDL_dummyaudio.c no longer calls dynCall('vi', $3, [$4]); "
+                        "drop the memory64 overlay in thirdparty/CMakeLists.txt if SDL fixed it")
+    else()
+        string(REPLACE "dynCall('vi', $3, [$4])" "dynCall('vp', $3, [$4])"
+               _sdl_dummy_code "${_sdl_dummy_code}")
+        file(WRITE "${_sdl_dummy_fixed}.tmp" "${_sdl_dummy_code}")
+        file(COPY_FILE "${_sdl_dummy_fixed}.tmp" "${_sdl_dummy_fixed}" ONLY_IF_DIFFERENT)
+        get_target_property(_sdl_sources SDL3-static SOURCES)
+        list(TRANSFORM _sdl_sources REPLACE "^.*/src/audio/dummy/SDL_dummyaudio\\.c$" "${_sdl_dummy_fixed}")
+        set_target_properties(SDL3-static PROPERTIES SOURCES "${_sdl_sources}")
+        set_source_files_properties("${_sdl_dummy_fixed}" TARGET_DIRECTORY SDL3-static PROPERTIES
+            INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/sdl3/src/audio/dummy")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_sdl_dummy_src}")
+    endif()
+endif()
+
 #=============================================================================
 # DXC API headers (vendored from DirectXShaderCompiler, runtime-loaded)
 #=============================================================================

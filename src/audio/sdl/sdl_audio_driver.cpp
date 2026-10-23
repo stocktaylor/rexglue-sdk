@@ -44,8 +44,17 @@ bool SDLAudioDriver::Initialize() {
   SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, "rexglue");
 
   if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-    REXAPU_ERROR("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}", SDL_GetError());
-    return false;
+    // Titles treat a failed XAudio client registration as fatal (the Blade
+    // dashboard exits), so with no audio device fall back to SDL's dummy
+    // driver, which consumes frames in real time. SDL only uses it when it is
+    // asked for by name, and only builds that include it (wasm) have it.
+    REXAPU_WARN("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}; trying the dummy audio driver",
+                SDL_GetError());
+    SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+      REXAPU_ERROR("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}", SDL_GetError());
+      return false;
+    }
   }
   sdl_initialized_ = true;
 

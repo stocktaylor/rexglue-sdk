@@ -68,16 +68,29 @@
     ctx.r3.u64 = (value);                                                                 \
   }
 
+// Exports are weak where the runtime links statically (wasm), so a project's
+// REX_HOOK of the same name replaces the SDK's, as it does natively by
+// overriding the shared library's definition. The registrar's &name then
+// resolves to the project's hook too.
+#if REX_PLATFORM_WASM
+#define REX_EXPORT_WEAK_DECL(name) extern "C" __attribute__((weak)) REX_FUNC(name);
+#else
+#define REX_EXPORT_WEAK_DECL(name)
+#endif
+
 // Export: hook + register in global registry for kernel ordinal lookup.
 #define REX_EXPORT(name, function) \
+  REX_EXPORT_WEAK_DECL(name)       \
   REX_HOOK(name, function)         \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
 
 #define REX_EXPORT_STUB(name) \
+  REX_EXPORT_WEAK_DECL(name)  \
   REX_STUB(name)              \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
 
 #define REX_EXPORT_STUB_RETURN(name, retval) \
+  REX_EXPORT_WEAK_DECL(name)                 \
   REX_STUB_RETURN(name, retval)              \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
 

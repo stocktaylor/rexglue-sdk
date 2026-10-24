@@ -153,19 +153,13 @@ void WireframeSampler::FinishCapture(ui::Presenter* presenter) {
       draws_skipped_depth_only_, draws_skipped_budget_);
 
   if (presenter) {
-    presenter->RefreshGuestOutput(
-        width_, height_, width_, height_,
-        [this](ui::Presenter::GuestOutputRefreshContext& context) {
-          auto& image =
-              static_cast<ui::software::SoftwarePresenter::SoftwareGuestOutputRefreshContext&>(
-                  context)
-                  .image();
-          for (uint32_t y = 0; y < height_; ++y) {
-            std::memcpy(image.data.data() + y * image.stride, pixels_.data() + size_t(y) * width_,
-                        size_t(width_) * sizeof(uint32_t));
-          }
-          return true;
-        });
+    presenter->RefreshGuestOutput(width_, height_, width_, height_,
+                                  [this](ui::Presenter::GuestOutputRefreshContext& context) {
+                                    // Software or WebGPU presenter (null_gpu_presenter).
+                                    context.SetIs8bpc(true);
+                                    return context.WriteRgba8(pixels_.data(),
+                                                              size_t(width_) * sizeof(uint32_t));
+                                  });
   }
 
   std::string dump_dir = REXCVAR_GET(null_gpu_sample_dump_dir);

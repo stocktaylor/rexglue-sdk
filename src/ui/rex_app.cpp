@@ -40,6 +40,9 @@
 #include <rex/version.h>
 
 #include <fmt/format.h>
+#if REX_PLATFORM_WASM
+#include <emscripten/em_asm.h>
+#endif
 #include <imgui.h>
 
 #include <algorithm>
@@ -175,6 +178,13 @@ bool ReXApp::SetupEnvironment() {
     log_config.app_name = std::string(GetName());
     log_config.log_dir = (exe_dir / "logs").string();
   }
+#if REX_PLATFORM_WASM
+  // In the browser a log file lands in the page's in-memory file system: log to
+  // the console too (the browser's, and emrun's terminal).
+  if (EM_ASM_INT({ return typeof process == = 'undefined' || !process.versions ?.node; })) {
+    log_config.log_to_console = true;
+  }
+#endif
 
   rex::InitLogging(log_config);
   rex::RegisterLogLevelCallback();

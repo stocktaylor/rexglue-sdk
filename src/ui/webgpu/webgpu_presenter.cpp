@@ -330,6 +330,19 @@ void WebGPUPresenter::Disconnect() {
   surface_height_ = 0;
 }
 
+bool WebGPUPresenter::WebGPUGuestOutputRefreshContext::WriteRgba8(const void* pixels,
+                                                                  size_t row_pitch) {
+  // On the device thread, like the refresher calling this.
+  WGPUTexelCopyTextureInfo destination = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+  destination.texture = texture_;
+  WGPUTexelCopyBufferLayout layout = WGPU_TEXEL_COPY_BUFFER_LAYOUT_INIT;
+  layout.bytesPerRow = uint32_t(row_pitch);
+  layout.rowsPerImage = height_;
+  WGPUExtent3D extent = {width_, height_, 1};
+  wgpuQueueWriteTexture(queue_, &destination, pixels, row_pitch * height_, &layout, &extent);
+  return true;
+}
+
 bool WebGPUPresenter::RefreshGuestOutputImpl(
     uint32_t mailbox_index, uint32_t frontbuffer_width, uint32_t frontbuffer_height,
     std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref) {
@@ -364,7 +377,8 @@ bool WebGPUPresenter::RefreshGuestOutputImpl(
       image.width = frontbuffer_width;
       image.height = frontbuffer_height;
     }
-    WebGPUGuestOutputRefreshContext context(is_8bpc_out_ref, image.texture, image.view);
+    WebGPUGuestOutputRefreshContext context(is_8bpc_out_ref, device().queue(), image.texture,
+                                            image.view, image.width, image.height);
     context.SetIs8bpc(true);
     refreshed = refresher(context);
   });
@@ -514,7 +528,13 @@ Presenter::PaintResult WebGPUPresenter::Paint(bool execute_ui_drawers) {
                     });
   }
 
+#if defined(__EMSCRIPTEN__)
+  // The canvas presents by itself when the device thread returns to its event
+  // loop, after this task; emdawnwebgpu aborts on wgpuSurfacePresent.
+  WGPUStatus present_status = WGPUStatus_Success;
+#else
   WGPUStatus present_status = wgpuSurfacePresent(surface_);
+#endif
   wgpuTextureViewRelease(target);
   wgpuTextureRelease(surface_texture.texture);
   if (present_status != WGPUStatus_Success) {

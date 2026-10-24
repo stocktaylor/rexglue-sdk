@@ -42,16 +42,26 @@ class WebGPUPresenter : public Presenter {
   // destination and sampled texture. The refresher runs on the device thread.
   class WebGPUGuestOutputRefreshContext final : public GuestOutputRefreshContext {
    public:
-    WebGPUGuestOutputRefreshContext(bool& is_8bpc_out_ref, WGPUTexture texture,
-                                    WGPUTextureView view)
-        : GuestOutputRefreshContext(is_8bpc_out_ref), texture_(texture), view_(view) {}
+    WebGPUGuestOutputRefreshContext(bool& is_8bpc_out_ref, WGPUQueue queue, WGPUTexture texture,
+                                    WGPUTextureView view, uint32_t width, uint32_t height)
+        : GuestOutputRefreshContext(is_8bpc_out_ref),
+          queue_(queue),
+          texture_(texture),
+          view_(view),
+          width_(width),
+          height_(height) {}
 
     WGPUTexture texture() const { return texture_; }
     WGPUTextureView view() const { return view_; }
 
+    bool WriteRgba8(const void* pixels, size_t row_pitch) override;
+
    private:
+    WGPUQueue queue_;
     WGPUTexture texture_;
     WGPUTextureView view_;
+    uint32_t width_;
+    uint32_t height_;
   };
 
   // What the immediate drawer and other UI drawers record into: the render

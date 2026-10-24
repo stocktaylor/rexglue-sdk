@@ -11,6 +11,8 @@
 
 #include <rex/ui/webgpu/provider.h>
 
+#include <rex/ui/webgpu/factory.h>
+
 #include <rex/ui/webgpu/immediate_drawer.h>
 #include <rex/ui/webgpu/presenter.h>
 
@@ -22,6 +24,10 @@ std::unique_ptr<WebGPUProvider> WebGPUProvider::Create(const std::string& canvas
     return nullptr;
   }
   return std::unique_ptr<WebGPUProvider>(new WebGPUProvider(std::move(device_thread)));
+}
+
+std::unique_ptr<GraphicsProvider> CreateWebGPUProvider() {
+  return WebGPUProvider::Create();
 }
 
 std::unique_ptr<Presenter> WebGPUProvider::CreatePresenter(

@@ -12,7 +12,18 @@
 #include <rex/graphics/null/command_processor.h>
 #include <rex/graphics/null/graphics_system.h>
 #include <rex/system/kernel_state.h>
+#include <rex/cvar.h>
+#include <rex/logging.h>
 #include <rex/ui/software/provider.h>
+#if REXGLUE_HAS_WEBGPU_RUNTIME
+#include <rex/ui/webgpu/factory.h>
+#endif
+
+REXCVAR_DEFINE_STRING(null_gpu_presenter, "software", "GPU/Null",
+                      "How the null GPU shows its sampled wireframes: software (SDL window "
+                      "framebuffer) or webgpu (WebGPU presenter; needs an SDK built with "
+                      "REXGLUE_USE_WEBGPU)")
+    .allowed({"software", "webgpu"});
 
 namespace rex::graphics::null {
 
@@ -25,9 +36,19 @@ std::string NullGraphicsSystem::name() const {
 }
 
 void NullGraphicsSystem::CreateProvider(bool with_presentation) {
+  if (with_presentation && REXCVAR_GET(null_gpu_presenter) == "webgpu") {
+#if REXGLUE_HAS_WEBGPU_RUNTIME
+    provider_ = rex::ui::webgpu::CreateWebGPUProvider();
+    if (provider_) {
+      return;
+    }
+    REXGPU_WARN("Null GPU: no WebGPU device; presenting in software");
+#else
+    REXGPU_WARN("Null GPU: this SDK was built without WebGPU; presenting in software");
+#endif
+  }
   // The software provider needs nothing from the host, so headless and
   // presenting setups use the same one.
-  (void)with_presentation;
   provider_ = rex::ui::software::SoftwareProvider::Create();
 }
 

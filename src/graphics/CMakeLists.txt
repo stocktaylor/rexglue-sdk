@@ -142,6 +142,11 @@ target_link_libraries(rexgpu-xenos PRIVATE
     rexruntime
     xxHash::xxhash
 )
+# The null GPU can present through WebGPU; the provider comes from the runtime
+# (ui/webgpu/factory.h), so the plugin needs no WebGPU headers or Dawn.
+if(REXGLUE_USE_WEBGPU)
+    target_compile_definitions(rexgpu-xenos PRIVATE REXGLUE_HAS_WEBGPU_RUNTIME=1)
+endif()
 
 if(REXGLUE_USE_VULKAN)
     target_link_libraries(rexgpu-xenos PRIVATE

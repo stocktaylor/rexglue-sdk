@@ -37,8 +37,17 @@ struct StartState {
 }  // namespace
 
 std::unique_ptr<WebGPUDeviceThread> WebGPUDeviceThread::Start(const std::string& canvas_selector) {
+  // Without WebGPU, don't take the canvas: whatever presents instead (the
+  // software presenter, through SDL) needs it.
+  if (!EM_ASM_INT({ return typeof navigator != = 'undefined' && !!navigator.gpu; })) {
+    REXLOG_WARN("WebGPU: not available in this browser (navigator.gpu)");
+    return nullptr;
+  }
   auto self = std::unique_ptr<WebGPUDeviceThread>(new WebGPUDeviceThread);
-  self->canvas_selector_ = canvas_selector;
+  // Under node (WebGPU from Dawn's node addon) there is no canvas to present to.
+  bool has_dom =
+      EM_ASM_INT({ return typeof process == = 'undefined' || !process.versions ?.node; });
+  self->canvas_selector_ = has_dom ? canvas_selector : std::string();
   self->queue_ = em_proxying_queue_create();
 
   // The canvas can be handed to the new thread only by the thread that owns
@@ -67,6 +76,14 @@ std::unique_ptr<WebGPUDeviceThread> WebGPUDeviceThread::Start(const std::string&
   if (args.result != 0 && !pthread_equal(pthread_self(), emscripten_main_runtime_thread_id())) {
     emscripten_proxy_sync(emscripten_proxy_get_system_queue(), emscripten_main_runtime_thread_id(),
                           create, &args);
+  }
+  if (args.result != 0 && !self->canvas_selector_.empty()) {
+    // No such canvas (under node, or a page without one): run without one;
+    // nothing can be presented then.
+    REXLOG_WARN("WebGPU: canvas {} unavailable; the device thread runs without one",
+                self->canvas_selector_);
+    self->canvas_selector_.clear();
+    create(&args);
   }
   if (args.result != 0) {
     REXLOG_ERROR("WebGPU: couldn't start the device thread ({})", args.result);

@@ -1,4 +1,6 @@
 #pragma once
+
+#include <cstring>
 /**
  * @file        ui/software/presenter.h
  * @brief       Presenter for CPU-generated guest output, painted via SDL
@@ -33,6 +35,14 @@ class SoftwarePresenter final : public Presenter {
 
     // Sized to the frontbuffer before the refresher is called.
     RawImage& image() const { return image_; }
+
+    bool WriteRgba8(const void* pixels, size_t row_pitch) override {
+      for (uint32_t y = 0; y < image_.height; ++y) {
+        std::memcpy(image_.data.data() + y * image_.stride,
+                    static_cast<const uint8_t*>(pixels) + y * row_pitch, size_t(image_.width) * 4);
+      }
+      return true;
+    }
 
    private:
     RawImage& image_;

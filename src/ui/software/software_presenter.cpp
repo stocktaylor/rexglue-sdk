@@ -17,6 +17,9 @@
 
 #include <SDL3/SDL_surface.h>
 #include <SDL3/SDL_video.h>
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/em_asm.h>
+#endif
 
 #include <rex/logging.h>
 #include <rex/ui/surface_sdl.h>
@@ -87,11 +90,72 @@ bool SoftwarePresenter::RefreshGuestOutputImpl(
   return refresher(context);
 }
 
+#if defined(__EMSCRIPTEN__)
+// Built with OffscreenCanvas support (for the WebGPU device thread), the page's
+// canvas belongs to main's pthread, the UI thread, where SDL's window
+// framebuffer, drawn on the browser's main thread, can't reach it. Draws the
+// guest output letterboxed on it with its 2D context instead. Returns false if
+// this thread doesn't own the canvas (then SDL's path works).
+static bool PaintToOwnedCanvas(const uint8_t* pixels, uint32_t image_width, uint32_t image_height,
+                               uint32_t aspect_x, uint32_t aspect_y, int width, int height) {
+  // Pointers arrive as Numbers; heap addresses can pass 4 GB under memory64,
+  // so no 32-bit bitwise operations on them.
+  return EM_ASM_INT(
+      {
+        var canvas = Module['canvas'];
+        if (typeof OffscreenCanvas == = 'undefined' || !(canvas instanceof OffscreenCanvas)) {
+          return 0;
+        }
+        if (canvas.width != $5 || canvas.height != $6) {
+          canvas.width = $5;
+          canvas.height = $6;
+        }
+        var ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, $5, $6);
+        if ($0 && $1 && $2) {
+          var data = new Uint8ClampedArray(HEAPU8.subarray($0, $0 + $1 * $2 * 4));
+          var source = new OffscreenCanvas($1, $2);
+          source.getContext('2d').putImageData(new ImageData(data, $1, $2), 0, 0);
+          var aspect = $3 / $4;
+          var dw = $5;
+          var dh = Math.round($5 / aspect);
+          if (dh > $6) {
+            dh = $6;
+            dw = Math.round($6 * aspect);
+          }
+          ctx.imageSmoothingEnabled = true;
+          ctx.drawImage(source, Math.floor(($5 - dw) / 2), Math.floor(($6 - dh) / 2), dw, dh);
+        }
+        return 1;
+      },
+      pixels, image_width, image_height, aspect_x, aspect_y, width, height);
+}
+#endif
+
 Presenter::PaintResult SoftwarePresenter::PaintAndPresentImpl(bool execute_ui_drawers) {
   (void)execute_ui_drawers;
   if (!window_) {
     return PaintResult::kNotPresentedConnectionOutdated;
   }
+#if defined(__EMSCRIPTEN__)
+  {
+    int width = 0, height = 0;
+    SDL_GetWindowSizeInPixels(window_, &width, &height);
+    uint32_t mailbox_index;
+    GuestOutputProperties properties;
+    auto consumer_lock = ConsumeGuestOutput(mailbox_index, &properties, nullptr);
+    const RawImage* image = mailbox_index != UINT32_MAX && properties.IsActive()
+                                ? &guest_output_images_[mailbox_index]
+                                : nullptr;
+    if (width > 0 && height > 0 &&
+        PaintToOwnedCanvas(image ? image->data.data() : nullptr, image ? image->width : 0,
+                           image ? image->height : 0, image ? properties.display_aspect_ratio_x : 1,
+                           image ? properties.display_aspect_ratio_y : 1, width, height)) {
+      return PaintResult::kPresented;
+    }
+  }
+#endif
   SDL_Surface* target = SDL_GetWindowSurface(window_);
   if (!target) {
     static bool logged = false;

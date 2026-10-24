@@ -199,6 +199,15 @@ class Presenter {
     // storage precision). If never called, assuming it's false.
     void SetIs8bpc(bool is_8bpc) { is_8bpc_out_ref_ = is_8bpc; }
 
+    // For refreshers that render on the CPU (the null GPU): fills the image
+    // from RGBA8 rows of the frontbuffer's width, row_pitch bytes apart.
+    // Returns false if this backend's image can't be written from the CPU.
+    virtual bool WriteRgba8(const void* pixels, size_t row_pitch) {
+      (void)pixels;
+      (void)row_pitch;
+      return false;
+    }
+
    protected:
     GuestOutputRefreshContext(bool& is_8bpc_out_ref) : is_8bpc_out_ref_(is_8bpc_out_ref) {
       is_8bpc_out_ref = false;

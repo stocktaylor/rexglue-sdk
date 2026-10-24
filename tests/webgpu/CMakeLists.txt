@@ -4,7 +4,9 @@
 #     the thread owns. Same code natively and in the browser (emrun).
 #   rexglue-webgpu-shaders: compiles every converted internal WGSL shader
 #     (src/graphics/shaders/webgpu_wgsl) on the device, compute shaders into
-#     pipelines. Natively and in the browser (emrun).
+#     pipelines. Natively, in the browser (emrun) and under node with Dawn
+#     (rex wasm dawn). No canvas: a build with OffscreenCanvas support can't
+#     start under node, as starting main's pthread transfers #canvas.
 #   rexglue-webgpu-presenter: a window drawn by WebGPUPresenter and the WebGPU
 #     immediate drawer (ImGui) for a few seconds; saves a presented frame and
 #     the guest output as BMPs in the working directory. Native only.
@@ -31,7 +33,7 @@ add_executable(rexglue-webgpu-shaders
 target_link_libraries(rexglue-webgpu-shaders PRIVATE rexcore rex::webgpu)
 if(EMSCRIPTEN)
     target_link_options(rexglue-webgpu-shaders PRIVATE
-        -sPROXY_TO_PTHREAD -sEXIT_RUNTIME --emrun -sENVIRONMENT=web,worker)
+        -sPROXY_TO_PTHREAD -sEXIT_RUNTIME --emrun -sENVIRONMENT=web,worker,node)
     set_target_properties(rexglue-webgpu-shaders PROPERTIES SUFFIX ".html")
 endif()
 

@@ -59,6 +59,7 @@ if(NOT EMSCRIPTEN)
         ${REXGLUE_WEBGPU_TEST_GRAPHICS}/pipeline/shader/translator_disasm.cpp
         ${REXGLUE_WEBGPU_TEST_GRAPHICS}/pipeline/shader/wgsl_translator.cpp
         ${REXGLUE_WEBGPU_TEST_GRAPHICS}/pipeline/shader/wgsl_translator_alu.cpp
+        ${REXGLUE_WEBGPU_TEST_GRAPHICS}/pipeline/shader/wgsl_translator_fetch.cpp
         ${REXGLUE_ROOT}/src/ui/webgpu/webgpu_device.cpp
         ${REXGLUE_ROOT}/src/ui/webgpu/webgpu_device_thread.cpp
     )

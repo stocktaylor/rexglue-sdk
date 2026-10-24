@@ -12,11 +12,14 @@
 
 #include <rex/graphics/pipeline/shader/wgsl_translator.h>
 
+#include <cstring>
+
 #include <algorithm>
 
 #include <fmt/format.h>
 
 #include <rex/assert.h>
+#include <rex/graphics/pipeline/shader/wgsl.h>
 #include <rex/math.h>
 
 namespace rex::graphics {
@@ -84,13 +87,15 @@ void WgslShaderTranslator::Reset() {
   uses_shared_memory_ = false;
   uses_float_constants_ = false;
   uses_bool_loop_constants_ = false;
+  uses_fetch_constants_ = false;
+  uses_pwl_gamma_to_linear_ = false;
   uses_fragment_coordinates_ = false;
   uses_front_facing_ = false;
   uses_point_coordinates_ = false;
   has_point_size_edge_flag_kill_vertex_ = false;
   clip_distance_count_ = 0;
-  reported_vertex_fetch_ = false;
-  reported_texture_fetch_ = false;
+  texture_bindings_.clear();
+  sampler_bindings_.clear();
   reported_memexport_ = false;
 }
 
@@ -180,6 +185,12 @@ void WgslShaderTranslator::StartTranslation() {
   Line("var xe_aL = vec4i(0i);");
   Line("var xe_lc = vec4u(0u);");
   Line("var xe_ps = 0.0f;");
+  // vfetch_full's address for vfetch_mini, and the texture fetch LOD and
+  // gradients set by setTexLOD and setGradientH/V.
+  Line("var xe_vfetch_address = 0i;");
+  Line("var xe_tfetch_lod = 0.0f;");
+  Line("var xe_tfetch_gradients_h = vec3f(0.0f);");
+  Line("var xe_tfetch_gradients_v = vec3f(0.0f);");
 
   if (is_vertex_shader()) {
     StartVertexShaderInMain();
@@ -256,10 +267,82 @@ std::string WgslShaderTranslator::BuildDeclarations() const {
         "@group({}) @binding({}) var<uniform> xe_bool_loop: XeBoolLoopConstants;\n\n",
         uint32_t(kBindGroupConstants), uint32_t(kConstantBufferBoolLoop));
   }
+  if (uses_fetch_constants_) {
+    out += fmt::format(
+        "struct XeFetchConstants {{\n  c: array<vec4u, 48>,\n}}\n"
+        "@group({}) @binding({}) var<uniform> xe_fetch: XeFetchConstants;\n\n",
+        uint32_t(kBindGroupConstants), uint32_t(kConstantBufferFetch));
+  }
   if (uses_shared_memory_) {
+    // Split into bindings of 2^(29 - n) bytes if needed.
+    uint32_t binding_count_log2 = features_.shared_memory_binding_count_log2;
+    uint32_t binding_count = uint32_t(1) << binding_count_log2;
+    for (uint32_t i = 0; i < binding_count; ++i) {
+      out += fmt::format(
+          "@group({}) @binding({}) var<storage, read> xe_shared_memory_{}: array<u32>;\n",
+          uint32_t(kBindGroupSharedMemory), i, i);
+    }
+    out += "\nfn xe_load_shared(address: i32) -> u32 {\n";
+    if (!binding_count_log2) {
+      out += "  return xe_shared_memory_0[address];\n";
+    } else {
+      uint32_t binding_address_bits = (29 - 2) - binding_count_log2;
+      out += fmt::format(
+          "  let binding_address = address & {}i;\n  var value = 0u;\n"
+          "  switch (bitcast<u32>(address) >> {}u) {{\n",
+          (uint32_t(1) << binding_address_bits) - 1, binding_address_bits);
+      for (uint32_t i = 0; i < binding_count; ++i) {
+        out += fmt::format("    case {}u: {{ value = xe_shared_memory_{}[binding_address]; }}\n", i,
+                           i);
+      }
+      out += "    default: {}\n  }\n  return value;\n";
+    }
+    out += "}\n\n";
+  }
+
+  // Textures, then samplers.
+  uint32_t texture_group =
+      uint32_t(is_vertex_shader() ? kBindGroupTexturesVertex : kBindGroupTexturesPixel);
+  for (size_t i = 0; i < texture_bindings_.size(); ++i) {
+    const char* type;
+    switch (texture_bindings_[i].dimension) {
+      case xenos::FetchOpDimension::k3DOrStacked:
+        type = "texture_3d<f32>";
+        break;
+      case xenos::FetchOpDimension::kCube:
+        type = "texture_cube<f32>";
+        break;
+      default:
+        type = "texture_2d_array<f32>";
+        break;
+    }
+    out += fmt::format("@group({}) @binding({}) var {}: {};\n", texture_group, i,
+                       TextureBindingName(i), type);
+  }
+  for (size_t i = 0; i < sampler_bindings_.size(); ++i) {
+    out += fmt::format("@group({}) @binding({}) var {}: sampler;\n", texture_group,
+                       texture_bindings_.size() + i, SamplerBindingName(i));
+  }
+  if (!texture_bindings_.empty() || !sampler_bindings_.empty()) {
+    out += "\n";
+  }
+
+  if (uses_pwl_gamma_to_linear_) {
+    // As SpirvShaderTranslator::PWLGammaToLinear.
     out +=
-        fmt::format("@group({}) @binding(0) var<storage, read> xe_shared_memory: array<u32>;\n\n",
-                    uint32_t(kBindGroupSharedMemory));
+        "fn xe_pwl_gamma_to_linear(gamma_unclamped: f32) -> f32 {\n"
+        "  let gamma = select(0.0f, min(gamma_unclamped, 1.0f), gamma_unclamped >= 0.0f);\n"
+        "  let piece_3 = gamma >= 192.0f / 255.0f;\n"
+        "  let piece_1 = gamma >= 64.0f / 255.0f;\n"
+        "  let piece_2 = gamma >= 96.0f / 255.0f;\n"
+        "  let scale = select(select(1.0f / 1024.0f, 2.0f / 1024.0f, piece_1),\n"
+        "                     select(4.0f / 1024.0f, 8.0f / 1024.0f, piece_3), piece_2);\n"
+        "  let offset = select(select(0.0f, -64.0f, piece_1), select(-256.0f, -1024.0f, piece_3),\n"
+        "                      piece_2);\n"
+        "  var value = gamma * (255.0f * 1024.0f) * scale + offset;\n"
+        "  value = value + trunc(value * scale);\n"
+        "  return value * (1.0f / 1023.0f);\n"
+        "}\n\n";
   }
 
   out += fmt::format(
@@ -380,7 +463,7 @@ void WgslShaderTranslator::StartVertexShaderInMain() {
     Line(
         "let xe_index_address = xe_system.vertex_index_load_address + "
         "(xe_vi << select(1u, 2u, xe_index_32bit));");
-    Line("var xe_index = xe_shared_memory[xe_index_address >> 2u];");
+    Line("var xe_index = xe_load_shared(i32(xe_index_address >> 2u));");
     OpenScope("if (!xe_index_32bit)");
     Line("xe_index = extractBits(xe_index, (xe_index_address & 2u) << 3u, 16u);");
     CloseScope();
@@ -389,7 +472,7 @@ void WgslShaderTranslator::StartVertexShaderInMain() {
   } else {
     OpenScope(
         fmt::format("if ((xe_system.flags & {}u) != 0u)", uint32_t(kSysFlag_VertexIndexLoad)));
-    Line("xe_vi = xe_shared_memory[(xe_system.vertex_index_load_address >> 2u) + xe_vi];");
+    Line("xe_vi = xe_load_shared(i32((xe_system.vertex_index_load_address >> 2u) + xe_vi));");
     CloseScope();
     Line("xe_vi = xe_endian_swap32(xe_vi, xe_system.vertex_index_endian);");
   }
@@ -607,28 +690,6 @@ void WgslShaderTranslator::ProcessAllocInstruction(const ParsedAllocInstruction&
       !reported_memexport_) {
     reported_memexport_ = true;
     EmitTranslationError("Memory export is not implemented in the WGSL translator yet", false);
-  }
-}
-
-void WgslShaderTranslator::ProcessVertexFetchInstruction(
-    const ParsedVertexFetchInstruction& instr) {
-  UpdateInstructionPredication(instr.is_predicated, instr.predicate_condition);
-  if (!reported_vertex_fetch_) {
-    reported_vertex_fetch_ = true;
-    EmitTranslationError("Vertex fetch is not implemented in the WGSL translator yet", false);
-  }
-  StoreResult(instr.result, Value{"0.0f", 1});
-}
-
-void WgslShaderTranslator::ProcessTextureFetchInstruction(
-    const ParsedTextureFetchInstruction& instr) {
-  UpdateInstructionPredication(instr.is_predicated, instr.predicate_condition);
-  if (!reported_texture_fetch_) {
-    reported_texture_fetch_ = true;
-    EmitTranslationError("Texture fetch is not implemented in the WGSL translator yet", false);
-  }
-  if (instr.has_result()) {
-    StoreResult(instr.result, Value{"0.0f", 1});
   }
 }
 
@@ -975,6 +1036,24 @@ void WgslShaderTranslator::StoreResult(const InstructionResult& result, const Va
         "xe_psek.x = bitcast<f32>(min(max(bitcast<i32>(xe_psek.x), "
         "bitcast<i32>(xe_system.point_vertex_diameter_min)), "
         "bitcast<i32>(xe_system.point_vertex_diameter_max)));");
+  }
+}
+
+void WgslShaderTranslator::PostTranslation() {
+  Shader::Translation& translation = current_translation();
+  if (!translation.is_valid()) {
+    return;
+  }
+  auto* wgsl_shader = dynamic_cast<WgslShader*>(&translation.shader());
+  if (!wgsl_shader ||
+      wgsl_shader->bindings_setup_entered_.test_and_set(std::memory_order_relaxed)) {
+    return;
+  }
+  wgsl_shader->texture_bindings_ = texture_bindings_;
+  wgsl_shader->sampler_bindings_ = sampler_bindings_;
+  wgsl_shader->used_texture_mask_ = 0;
+  for (const TextureBinding& binding : texture_bindings_) {
+    wgsl_shader->used_texture_mask_ |= UINT32_C(1) << binding.fetch_constant;
   }
 }
 

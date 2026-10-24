@@ -63,6 +63,7 @@ set(REXGPU_XENOS_VULKAN_SOURCES
 set(REXGPU_XENOS_WGSL_SOURCES
     pipeline/shader/wgsl_translator.cpp
     pipeline/shader/wgsl_translator_alu.cpp
+    pipeline/shader/wgsl_translator_fetch.cpp
 )
 
 # D3D12 backend

@@ -9,7 +9,8 @@
  *              See LICENSE file in the project root for full license text.
  */
 
-// Usage: rexglue-webgpu-xenos-shaders [--dump DIR] [--dump-all] [--verbose] FILE.xsh...
+// Usage: rexglue-webgpu-xenos-shaders [--dump DIR] [--dump-all] [--verbose]
+//            [--resolution-scale N] FILE.xsh...
 //
 // Reads Xenos shader storage files (the shareable .xsh caches written by the
 // Vulkan and D3D12 backends), translates every shader with
@@ -20,9 +21,14 @@
 // shaders behind a vertex shader with matching outputs). With --dump, each
 // rejected shader's WGSL and ucode disassembly go to DIR (every shader's with
 // --dump-all). An invalid shader is validated too, and must be rejected, so a
-// pass means the validation ran.
+// pass means the validation ran. --resolution-scale translates for a draw
+// resolution scale (the resolve-scaled texture and PsParamGen paths). Shaders
+// using more textures or samplers than WebGPU's default per-stage limit (16)
+// are counted, as they need devices with higher limits.
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -37,6 +43,7 @@
 
 #include <rex/cvar.h>
 #include <rex/graphics/pipeline/shader/shader.h>
+#include <rex/graphics/pipeline/shader/wgsl.h>
 #include <rex/graphics/pipeline/shader/wgsl_translator.h>
 #include <rex/string/buffer.h>
 #include <rex/ui/webgpu/device_thread.h>
@@ -48,6 +55,7 @@ REXCVAR_DEFINE_STRING(dump_shaders, "", "GPU", "Path to dump shaders to");
 namespace {
 
 using rex::graphics::Shader;
+using rex::graphics::WgslShader;
 using rex::graphics::WgslShaderTranslator;
 using rex::ui::webgpu::kDeviceThreadCallbackMode;
 using rex::ui::webgpu::WebGPUDeviceThread;
@@ -83,7 +91,7 @@ std::string FromView(WGPUStringView view) {
 }
 
 bool ReadShaderStorage(const std::filesystem::path& path,
-                       std::vector<std::unique_ptr<Shader>>& shaders,
+                       std::vector<std::unique_ptr<WgslShader>>& shaders,
                        std::set<std::pair<uint64_t, uint32_t>>& seen) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -121,7 +129,7 @@ bool ReadShaderStorage(const std::filesystem::path& path,
     if (!seen.emplace(hash, uint32_t(type)).second) {
       continue;
     }
-    shaders.push_back(std::make_unique<Shader>(type, hash, dwords.data(), dwords.size()));
+    shaders.push_back(std::make_unique<WgslShader>(type, hash, dwords.data(), dwords.size()));
     ++count;
   }
   std::printf("%s: %zu new shaders\n", path.string().c_str(), count);
@@ -230,12 +238,15 @@ int main(int argc, char** argv) {
   std::filesystem::path dump_dir;
   bool dump_all = false;
   bool verbose = false;
+  uint32_t resolution_scale = 1;
   std::vector<std::filesystem::path> inputs;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--dump") && i + 1 < argc) {
       dump_dir = argv[++i];
     } else if (!std::strcmp(argv[i], "--dump-all")) {
       dump_all = true;
+    } else if (!std::strcmp(argv[i], "--resolution-scale") && i + 1 < argc) {
+      resolution_scale = uint32_t(std::strtoul(argv[++i], nullptr, 10));
     } else if (!std::strcmp(argv[i], "--verbose")) {
       verbose = true;
     } else {
@@ -243,11 +254,13 @@ int main(int argc, char** argv) {
     }
   }
   if (inputs.empty()) {
-    std::printf("usage: %s [--dump DIR] [--dump-all] [--verbose] FILE.xsh...\n", argv[0]);
+    std::printf(
+        "usage: %s [--dump DIR] [--dump-all] [--verbose] [--resolution-scale N] FILE.xsh...\n",
+        argv[0]);
     return 2;
   }
 
-  std::vector<std::unique_ptr<Shader>> shaders;
+  std::vector<std::unique_ptr<WgslShader>> shaders;
   std::set<std::pair<uint64_t, uint32_t>> seen;
   for (const auto& input : inputs) {
     ReadShaderStorage(input, shaders, seen);
@@ -266,7 +279,7 @@ int main(int argc, char** argv) {
   });
 
   // Translate.
-  WgslShaderTranslator translator(features);
+  WgslShaderTranslator translator(features, resolution_scale, resolution_scale);
   rex::string::StringBuffer ucode_disasm_buffer;
   std::vector<Case> cases;
   for (const auto& shader_ptr : shaders) {
@@ -390,10 +403,21 @@ int main(int argc, char** argv) {
       std::ofstream(dump_dir / (name + ".ucode.txt")) << c.shader->ucode_disassembly();
     }
   }
-  size_t vertex = 0;
+  size_t vertex = 0, over_texture_limit = 0, over_sampler_limit = 0, max_textures = 0,
+         max_samplers = 0;
   for (const auto& shader : shaders) {
     vertex += shader->type() == xenos::ShaderType::kVertex;
+    size_t textures = shader->GetTextureBindingsAfterTranslation().size();
+    size_t samplers = shader->GetSamplerBindingsAfterTranslation().size();
+    over_texture_limit += textures > 16;
+    over_sampler_limit += samplers > 16;
+    max_textures = std::max(max_textures, textures);
+    max_samplers = std::max(max_samplers, samplers);
   }
+  std::printf(
+      "bindings per shader: up to %zu textures (%zu shaders over 16), up to %zu samplers (%zu "
+      "over 16)\n",
+      max_textures, over_texture_limit, max_samplers, over_sampler_limit);
   std::printf(
       "%zu shaders (%zu vertex, %zu pixel), %zu translations: %zu accepted, %zu rejected, "
       "%zu not translated\n",

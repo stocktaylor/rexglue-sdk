@@ -29,9 +29,11 @@ namespace rex::graphics {
 // are expanded from triangle strips, and vertex kill uses a NaN W.
 //
 // Resources:
-//   @group(0) @binding(0): shared memory, array<u32> in a storage buffer.
+//   @group(0): shared memory, array<u32> in 1, 2 or 4 storage buffers
+//     (Features::shared_memory_binding_count_log2), at bindings 0 and up.
 //   @group(1): constants, @binding(ConstantBuffer).
-//   @group(2), @group(3): vertex and pixel shader textures and samplers.
+//   @group(2), @group(3): vertex and pixel shader textures, in the order of
+//     the shader's texture bindings, then its samplers (WgslShader).
 class WgslShaderTranslator : public ShaderTranslator {
  public:
   union Modification {
@@ -209,6 +211,25 @@ class WgslShaderTranslator : public ShaderTranslator {
   struct Features {
     // clip_distances in WGSL.
     bool clip_distances = false;
+    // Shared memory (512 MB) split into 2^n storage buffer bindings, for
+    // devices whose maxStorageBufferBindingSize is under 512 MB (n <= 2).
+    uint32_t shared_memory_binding_count_log2 = 0;
+  };
+
+  // Gathered during translation, independent of the modification.
+  struct TextureBinding {
+    uint32_t fetch_constant;
+    // k1D is bound as k2D; stacked (as a 2D array) and 3D textures are
+    // separate bindings.
+    xenos::FetchOpDimension dimension;
+    bool is_signed;
+  };
+  struct SamplerBinding {
+    uint32_t fetch_constant;
+    xenos::TextureFilter mag_filter;
+    xenos::TextureFilter min_filter;
+    xenos::TextureFilter mip_filter;
+    xenos::AnisoFilter aniso_filter;
   };
 
   explicit WgslShaderTranslator(const Features& features, uint32_t draw_resolution_scale_x = 1,
@@ -246,6 +267,8 @@ class WgslShaderTranslator : public ShaderTranslator {
 
   void ProcessAluInstruction(const ParsedAluInstruction& instr,
                              uint8_t memexport_eM_potentially_written_before) override;
+
+  void PostTranslation() override;
 
  private:
   // A WGSL expression of f32 (n == 1) or vecNf.
@@ -316,6 +339,29 @@ class WgslShaderTranslator : public ShaderTranslator {
   void StoreResult(const InstructionResult& result, const Value& value);
   void KillPixel(const std::string& condition);
 
+  // Fetches.
+  // A u32 from shared memory at an i32 dword address.
+  std::string LoadUint32FromSharedMemory(const std::string& address_dwords);
+  // Dword `dword_index` of the fetch constants, as a u32 expression.
+  static std::string FetchConstantWord(uint32_t dword_index);
+  size_t FindOrAddTextureBinding(uint32_t fetch_constant, xenos::FetchOpDimension dimension,
+                                 bool is_signed);
+  size_t FindOrAddSamplerBinding(uint32_t fetch_constant, xenos::TextureFilter mag_filter,
+                                 xenos::TextureFilter min_filter, xenos::TextureFilter mip_filter,
+                                 xenos::AnisoFilter aniso_filter);
+  std::string TextureBindingName(size_t index) const;
+  std::string SamplerBindingName(size_t index) const;
+  // Emits new vec4f variables (returned in result_*_out) holding the unsigned
+  // and the signed sample expressions, each evaluated only if a component
+  // needs it (0 otherwise); with lerp_factor, mixed from lerp_first_* (for
+  // stacked textures filtered between layers).
+  void SampleTexture(const std::string& sample_unsigned, const std::string& sample_signed,
+                     const std::string& is_any_unsigned, const std::string& is_any_signed,
+                     std::string& result_unsigned_out, std::string& result_signed_out,
+                     const std::string& lerp_factor = std::string(),
+                     const std::string& lerp_first_unsigned = std::string(),
+                     const std::string& lerp_first_signed = std::string());
+
   Value ProcessVectorAluOperation(const ParsedAluInstruction& instr, bool& predicate_written);
   Value ProcessScalarAluOperation(const ParsedAluInstruction& instr, bool& predicate_written);
 
@@ -353,14 +399,16 @@ class WgslShaderTranslator : public ShaderTranslator {
   bool uses_shared_memory_ = false;
   bool uses_float_constants_ = false;
   bool uses_bool_loop_constants_ = false;
+  bool uses_fetch_constants_ = false;
+  bool uses_pwl_gamma_to_linear_ = false;
   bool uses_fragment_coordinates_ = false;
   bool uses_front_facing_ = false;
   bool uses_point_coordinates_ = false;
   bool has_point_size_edge_flag_kill_vertex_ = false;
   uint32_t clip_distance_count_ = 0;
-  // Fatal or one-time non-fatal errors already reported.
-  bool reported_vertex_fetch_ = false;
-  bool reported_texture_fetch_ = false;
+  std::vector<TextureBinding> texture_bindings_;
+  std::vector<SamplerBinding> sampler_bindings_;
+  // One-time non-fatal errors already reported.
   bool reported_memexport_ = false;
 };
 

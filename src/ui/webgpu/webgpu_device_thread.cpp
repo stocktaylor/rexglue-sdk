@@ -39,14 +39,17 @@ struct StartState {
 std::unique_ptr<WebGPUDeviceThread> WebGPUDeviceThread::Start(const std::string& canvas_selector) {
   // Without WebGPU, don't take the canvas: whatever presents instead (the
   // software presenter, through SDL) needs it.
-  if (!EM_ASM_INT({ return typeof navigator != = 'undefined' && !!navigator.gpu; })) {
+  // clang-format off (it would split the JavaScript's operators)
+  if (!EM_ASM_INT({ return typeof navigator != 'undefined' && !!navigator.gpu; })) {
+    // clang-format on
     REXLOG_WARN("WebGPU: not available in this browser (navigator.gpu)");
     return nullptr;
   }
   auto self = std::unique_ptr<WebGPUDeviceThread>(new WebGPUDeviceThread);
   // Under node (WebGPU from Dawn's node addon) there is no canvas to present to.
-  bool has_dom =
-      EM_ASM_INT({ return typeof process == = 'undefined' || !process.versions ?.node; });
+  // clang-format off
+  bool has_dom = EM_ASM_INT({ return typeof process == 'undefined' || !process.versions || !process.versions.node; });
+  // clang-format on
   self->canvas_selector_ = has_dom ? canvas_selector : std::string();
   self->queue_ = em_proxying_queue_create();
 

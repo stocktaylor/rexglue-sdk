@@ -181,7 +181,11 @@ bool ReXApp::SetupEnvironment() {
 #if REX_PLATFORM_WASM
   // In the browser a log file lands in the page's in-memory file system: log to
   // the console too (the browser's, and emrun's terminal).
-  if (EM_ASM_INT({ return typeof process == = 'undefined' || !process.versions ?.node; })) {
+  // clang-format off (it would split the JavaScript's operators)
+  if (EM_ASM_INT({
+        return typeof process == 'undefined' || !process.versions || !process.versions.node;
+      })) {
+    // clang-format on
     log_config.log_to_console = true;
   }
 #endif

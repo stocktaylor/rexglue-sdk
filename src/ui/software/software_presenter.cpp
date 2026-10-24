@@ -100,10 +100,11 @@ static bool PaintToOwnedCanvas(const uint8_t* pixels, uint32_t image_width, uint
                                uint32_t aspect_x, uint32_t aspect_y, int width, int height) {
   // Pointers arrive as Numbers; heap addresses can pass 4 GB under memory64,
   // so no 32-bit bitwise operations on them.
+  // clang-format off (it would split the JavaScript's operators)
   return EM_ASM_INT(
       {
         var canvas = Module['canvas'];
-        if (typeof OffscreenCanvas == = 'undefined' || !(canvas instanceof OffscreenCanvas)) {
+        if (typeof OffscreenCanvas == 'undefined' || !(canvas instanceof OffscreenCanvas)) {
           return 0;
         }
         if (canvas.width != $5 || canvas.height != $6) {
@@ -130,6 +131,7 @@ static bool PaintToOwnedCanvas(const uint8_t* pixels, uint32_t image_width, uint
         return 1;
       },
       pixels, image_width, image_height, aspect_x, aspect_y, width, height);
+  // clang-format on
 }
 #endif
 

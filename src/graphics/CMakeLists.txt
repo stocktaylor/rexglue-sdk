@@ -59,6 +59,12 @@ set(REXGPU_XENOS_VULKAN_SOURCES
     vulkan/texture_cache.cpp
 )
 
+# WGSL shader translation (for the WebGPU backend; plain C++, no WebGPU needed)
+set(REXGPU_XENOS_WGSL_SOURCES
+    pipeline/shader/wgsl_translator.cpp
+    pipeline/shader/wgsl_translator_alu.cpp
+)
+
 # D3D12 backend
 if(REXGLUE_USE_D3D12)
     # DXBC third-party dependency
@@ -92,6 +98,10 @@ endif()
 
 if(REXGLUE_USE_VULKAN)
     list(APPEND REXGPU_XENOS_SOURCES ${REXGPU_XENOS_SPIRV_SOURCES} ${REXGPU_XENOS_VULKAN_SOURCES})
+endif()
+
+if(REXGLUE_USE_WEBGPU)
+    list(APPEND REXGPU_XENOS_SOURCES ${REXGPU_XENOS_WGSL_SOURCES})
 endif()
 
 if(REXGLUE_USE_D3D12)

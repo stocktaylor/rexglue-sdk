@@ -106,7 +106,9 @@ set(REXGPU_XENOS_WEBGPU_SOURCES
     webgpu/command_list.cpp
     webgpu/command_processor.cpp
     webgpu/graphics_system.cpp
+    webgpu/pipeline_cache.cpp
     webgpu/primitive_processor.cpp
+    webgpu/render_target_cache.cpp
     webgpu/shared_memory.cpp
 )
 

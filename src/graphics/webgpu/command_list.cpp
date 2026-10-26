@@ -34,6 +34,13 @@ void* WebGPUCommandList::AllocateUpload(size_t size, uint64_t& offset_out) {
   return data;
 }
 
+void* WebGPUCommandList::AllocateUniforms(size_t size, uint32_t& offset_out) {
+  size_t offset = rex::align(uniforms_.size(), kUniformAlignment);
+  uniforms_.resize(offset + size);
+  offset_out = uint32_t(offset);
+  return uniforms_.data() + offset;
+}
+
 void WebGPUCommandList::RecordUploadCopy(uint64_t staging_offset, WGPUBuffer destination,
                                          uint64_t destination_offset, uint64_t size) {
   Record([=](Encoder& encoder) {
@@ -42,8 +49,34 @@ void WebGPUCommandList::RecordUploadCopy(uint64_t staging_offset, WGPUBuffer des
   });
 }
 
-void WebGPUCommandList::Execute(WGPUDevice device, WGPUQueue queue) {
+void WebGPUCommandList::Execute(WGPUDevice device, WGPUQueue queue,
+                                WGPUBindGroupLayout constants_layout, uint32_t binding_count) {
   Encoder encoder{device, wgpuDeviceCreateCommandEncoder(device, nullptr), nullptr};
+  WGPUBuffer uniform_buffer = nullptr;
+  if (!uniforms_.empty()) {
+    // Every binding's window must fit from any offset.
+    WGPUBufferDescriptor desc = WGPU_BUFFER_DESCRIPTOR_INIT;
+    desc.size = rex::align(uint64_t(uniforms_.size()), uint64_t(4)) + kUniformBindingSize;
+    desc.usage = WGPUBufferUsage_Uniform;
+    desc.mappedAtCreation = true;
+    uniform_buffer = wgpuDeviceCreateBuffer(device, &desc);
+    void* mapping = wgpuBufferGetMappedRange(uniform_buffer, 0, desc.size);
+    if (mapping) {
+      std::memcpy(mapping, uniforms_.data(), uniforms_.size());
+    }
+    wgpuBufferUnmap(uniform_buffer);
+    std::vector<WGPUBindGroupEntry> entries(binding_count, WGPU_BIND_GROUP_ENTRY_INIT);
+    for (uint32_t i = 0; i < binding_count; ++i) {
+      entries[i].binding = i;
+      entries[i].buffer = uniform_buffer;
+      entries[i].size = kUniformBindingSize;
+    }
+    WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+    group_desc.layout = constants_layout;
+    group_desc.entryCount = binding_count;
+    group_desc.entries = entries.data();
+    encoder.constants = wgpuDeviceCreateBindGroup(device, &group_desc);
+  }
   if (upload_size_) {
     // The used part of the last chunk is enough.
     uint64_t staging_size = chunks_.back().offset + chunks_.back().used;
@@ -77,7 +110,14 @@ void WebGPUCommandList::Execute(WGPUDevice device, WGPUQueue queue) {
   if (encoder.staging) {
     wgpuBufferRelease(encoder.staging);
   }
+  if (encoder.constants) {
+    wgpuBindGroupRelease(encoder.constants);
+  }
+  if (uniform_buffer) {
+    wgpuBufferRelease(uniform_buffer);
+  }
   commands_.clear();
+  uniforms_.clear();
   chunks_.clear();
   upload_size_ = 0;
   upload_bytes_ = 0;

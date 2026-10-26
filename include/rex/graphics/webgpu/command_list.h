@@ -29,7 +29,9 @@ namespace rex::graphics::webgpu {
 // index usage) when the list executes: recorded copies out of it run in order
 // with the other commands (unlike wgpuQueueWriteBuffer, which takes effect
 // before the whole submission), and converted index buffers are drawn from it
-// directly.
+// directly. Guest constants go to a second arena, which becomes the
+// submission's uniform buffer, bound through one bind group with dynamic
+// offsets (WgslShaderTranslator's @group(1)).
 class WebGPUCommandList {
  public:
   // What commands record into, on the device thread.
@@ -40,10 +42,18 @@ class WebGPUCommandList {
     WGPUBuffer staging;
     // The open render pass, if any.
     WGPURenderPassEncoder pass = nullptr;
+    // @group(1) over the submission's uniform buffer, or nullptr if no
+    // constants were written.
+    WGPUBindGroup constants = nullptr;
   };
   using Command = std::function<void(Encoder& encoder)>;
 
   static constexpr size_t kUploadAlignment = 16;
+  // The largest minUniformBufferOffsetAlignment WebGPU allows.
+  static constexpr size_t kUniformAlignment = 256;
+  // Bindings of the constants bind group, all windows of this size into the
+  // uniform buffer (the largest constant buffer, 256 float4 constants).
+  static constexpr uint32_t kUniformBindingSize = 4096;
 
   WebGPUCommandList() = default;
   WebGPUCommandList(const WebGPUCommandList&) = delete;
@@ -59,13 +69,19 @@ class WebGPUCommandList {
   // offset_out is its offset in the staging buffer.
   void* AllocateUpload(size_t size, uint64_t& offset_out);
 
+  // Memory for `size` bytes of constants, valid until the next allocation;
+  // offset_out is their (dynamic) offset in the uniform buffer.
+  void* AllocateUniforms(size_t size, uint32_t& offset_out);
+
   // Records a copy from the staging buffer.
   void RecordUploadCopy(uint64_t staging_offset, WGPUBuffer destination,
                         uint64_t destination_offset, uint64_t size);
 
-  // On the device thread: creates the staging buffer, replays the commands
-  // and submits. Ends a render pass left open.
-  void Execute(WGPUDevice device, WGPUQueue queue);
+  // On the device thread: creates the staging and uniform buffers and the
+  // constants bind group (with constants_layout, binding_count bindings),
+  // replays the commands and submits. Ends a render pass left open.
+  void Execute(WGPUDevice device, WGPUQueue queue, WGPUBindGroupLayout constants_layout,
+               uint32_t binding_count);
 
  private:
   struct Chunk {
@@ -77,6 +93,7 @@ class WebGPUCommandList {
   static constexpr size_t kChunkSize = size_t(4) << 20;
 
   std::vector<Command> commands_;
+  std::vector<uint8_t> uniforms_;
   std::vector<Chunk> chunks_;
   uint64_t upload_size_ = 0;
   uint64_t upload_bytes_ = 0;

@@ -295,6 +295,10 @@ class WgslShaderTranslator : public ShaderTranslator {
   // Pixel shader output modes, as in the SPIR-V translator's host render
   // target path. WGSL can't request early fragment tests, but with the hint
   // the backend has alpha test and alpha to coverage off, so they're skipped.
+  bool IsRectangleListVertexLoop() const {
+    return is_vertex_shader() && GetWgslShaderModification().vertex.host_vertex_shader_type ==
+                                     Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
+  }
   bool IsEarlyFragmentTestsHint() const {
     return is_pixel_shader() &&
            GetWgslShaderModification().pixel.depth_stencil_mode ==
@@ -400,6 +404,7 @@ class WgslShaderTranslator : public ShaderTranslator {
   // Prologues and epilogues.
   void StartVertexShaderInMain();
   void CompleteVertexShaderInMain();
+  void CompleteRectangleListVertexLoop();
   void StartPixelShaderInMain();
   void CompletePixelShaderInMain();
   std::string BuildDeclarations() const;

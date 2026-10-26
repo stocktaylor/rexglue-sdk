@@ -166,9 +166,10 @@ void WgslShaderTranslator::StartTranslation() {
     Shader::HostVertexShaderType host_vertex_shader_type =
         modification.vertex.host_vertex_shader_type;
     if (host_vertex_shader_type != Shader::HostVertexShaderType::kVertex &&
-        host_vertex_shader_type != Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
-      // No tessellation in WebGPU; rectangles and the memexport compute shader
-      // aren't done yet.
+        host_vertex_shader_type != Shader::HostVertexShaderType::kPointListAsTriangleStrip &&
+        host_vertex_shader_type != Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
+      // No tessellation in WebGPU; the memexport compute shader isn't done
+      // yet.
       EmitTranslationError("Unsupported host vertex shader type");
     }
   }
@@ -176,6 +177,21 @@ void WgslShaderTranslator::StartTranslation() {
   indent_ = 1;
   if (is_vertex_shader()) {
     Line("var xe_out: XeVertexOutput;");
+    if (IsRectangleListVertexLoop()) {
+      // As in the SPIR-V translator without geometry shaders: the guest shader
+      // runs for the guest rectangle's 3 vertices, each iteration with fresh
+      // state (declared in the loop body), and the outputs are kept to build
+      // this host vertex from (see CompleteTranslation).
+      Line("var xe_rect_positions: array<vec4f, 3>;");
+      uint32_t interpolators_remaining = GetModificationInterpolatorMask();
+      uint32_t interpolator_index;
+      while (rex::bit_scan_forward(interpolators_remaining, &interpolator_index)) {
+        interpolators_remaining &= ~(UINT32_C(1) << interpolator_index);
+        Line(fmt::format("var xe_rect_i{}: array<vec4f, 3>;", interpolator_index));
+      }
+      OpenScope("for (var xe_rect_vertex = 0u; xe_rect_vertex < 3u; xe_rect_vertex++)");
+      Line("xe_out = XeVertexOutput();");
+    }
     Line("var xe_pos = vec4f(0.0f);");
   } else if (HasFragmentOutput()) {
     Line("var xe_out: XeFragmentOutput;");
@@ -227,6 +243,9 @@ std::vector<uint8_t> WgslShaderTranslator::CompleteTranslation() {
 
   if (is_vertex_shader()) {
     CompleteVertexShaderInMain();
+    if (IsRectangleListVertexLoop()) {
+      CompleteRectangleListVertexLoop();
+    }
   } else {
     CompletePixelShaderInMain();
   }
@@ -497,7 +516,8 @@ void WgslShaderTranslator::StartVertexShaderInMain() {
       modification.vertex.output_point_parameters) {
     uses_point_coordinates_ = true;
   }
-  if (features_.clip_distances) {
+  // Not for rectangles yet, which would need them per guest vertex.
+  if (features_.clip_distances && !IsRectangleListVertexLoop()) {
     clip_distance_count_ = modification.GetVertexClipDistanceCount();
   }
 
@@ -508,9 +528,12 @@ void WgslShaderTranslator::StartVertexShaderInMain() {
   uses_shared_memory_ = true;
   Line("var xe_vi = xe_vertex_index;");
   Line("xe_vi = select(0u, xe_vi, xe_vi != xe_system.line_loop_closing_index);");
-  if (host_vertex_shader_type == Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
-    // 4 host vertices per guest point.
-    Line("xe_vi = xe_vi >> 2u;");
+  if (host_vertex_shader_type == Shader::HostVertexShaderType::kPointListAsTriangleStrip ||
+      host_vertex_shader_type == Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
+    // 4 host vertices per guest point or rectangle (the 3 guest vertices of a
+    // rectangle all run in each).
+    Line(IsRectangleListVertexLoop() ? "xe_vi = (xe_vi >> 2u) * 3u + xe_rect_vertex;"
+                                     : "xe_vi = xe_vi >> 2u;");
     OpenScope(fmt::format("if ((xe_system.flags & {}u) != 0u)",
                           uint32_t(kSysFlag_ComputeOrPrimitiveVertexIndexLoad)));
     Line(fmt::format("let xe_index_32bit = (xe_system.flags & {}u) != 0u;",
@@ -581,6 +604,53 @@ void WgslShaderTranslator::CompleteVertexShaderInMain() {
     }
   } else {
     Line("xe_out.position = vec4f(xe_xyz, xe_w);");
+  }
+}
+
+void WgslShaderTranslator::CompleteRectangleListVertexLoop() {
+  // Keep this guest vertex's outputs and close the loop.
+  Line("xe_rect_positions[xe_rect_vertex] = xe_out.position;");
+  uint32_t interpolator_mask = GetModificationInterpolatorMask();
+  uint32_t interpolators_remaining = interpolator_mask;
+  uint32_t interpolator_index;
+  while (rex::bit_scan_forward(interpolators_remaining, &interpolator_index)) {
+    interpolators_remaining &= ~(UINT32_C(1) << interpolator_index);
+    Line(fmt::format("xe_rect_i{}[xe_rect_vertex] = xe_out.i{};", interpolator_index,
+                     interpolator_index));
+  }
+  CloseScope();
+  // Host vertices 0-2 of the strip are the guest vertices, ordered so that
+  // vertex 0 is the one opposite the longest edge (the right angle); vertex 3
+  // completes the parallelogram.
+  Line("let xe_rect_host_vertex = xe_vertex_index & 3u;");
+  Line("let xe_rect_edges = vec3f(");
+  ++indent_;
+  for (uint32_t i = 0; i < 3; ++i) {
+    Line(
+        fmt::format("dot(xe_rect_positions[{}].xy - xe_rect_positions[{}].xy, "
+                    "xe_rect_positions[{}].xy - xe_rect_positions[{}].xy){}",
+                    (2 + i) % 3, (1 + i) % 3, (2 + i) % 3, (1 + i) % 3, i < 2 ? "," : ""));
+  }
+  --indent_;
+  Line(");");
+  Line(
+      "let xe_rect_v0 = select(select(2u, 1u, xe_rect_edges.y > xe_rect_edges.z), 0u, "
+      "xe_rect_edges.x > xe_rect_edges.y && xe_rect_edges.x > xe_rect_edges.z);");
+  Line("let xe_rect_v1 = (xe_rect_v0 + 1u) % 3u;");
+  Line("let xe_rect_v2 = (xe_rect_v0 + 2u) % 3u;");
+  auto corner = [&](const std::string& array) {
+    return fmt::format(
+        "select(select(select({}[xe_rect_v2], {}[xe_rect_v1], xe_rect_host_vertex == 1u), "
+        "{}[xe_rect_v0], xe_rect_host_vertex == 0u), "
+        "{}[xe_rect_v1] - {}[xe_rect_v0] + {}[xe_rect_v2], xe_rect_host_vertex == 3u)",
+        array, array, array, array, array, array);
+  };
+  Line(fmt::format("xe_out.position = {};", corner("xe_rect_positions")));
+  interpolators_remaining = interpolator_mask;
+  while (rex::bit_scan_forward(interpolators_remaining, &interpolator_index)) {
+    interpolators_remaining &= ~(UINT32_C(1) << interpolator_index);
+    Line(fmt::format("xe_out.i{} = {};", interpolator_index,
+                     corner(fmt::format("xe_rect_i{}", interpolator_index))));
   }
 }
 

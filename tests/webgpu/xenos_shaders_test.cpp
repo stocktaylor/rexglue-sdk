@@ -15,11 +15,11 @@
 // Reads Xenos shader storage files (the shareable .xsh caches written by the
 // Vulkan and D3D12 backends), translates every shader with
 // WgslShaderTranslator under a few modifications covering the translator's
-// paths (host vertex shader types, PsParamGen, centroid interpolation, clip
-// distances, early depth hint, float24 depth), and has the device validate the WGSL: a shader
-// module, then a render pipeline with an automatic layout (vertex shaders alone, pixel shaders
-// behind a vertex shader with matching outputs). With --dump, each rejected shader's WGSL and ucode
-// disassembly go to DIR (every shader's with
+// paths (host vertex shader types: vertices, points, rectangles; PsParamGen, centroid
+// interpolation, clip distances, early depth hint, float24 depth), and has the device validate the
+// WGSL: a shader module, then a render pipeline with an automatic layout (vertex shaders alone,
+// pixel shaders behind a vertex shader with matching outputs). With --dump, each rejected shader's
+// WGSL and ucode disassembly go to DIR (every shader's with
 // --dump-all). The translator's float24 depth and PWL gamma helpers, taken
 // from the translated shaders, also run in a compute shader over millions of
 // inputs, compared with the CPU versions in xenos.h (depth bit-exact, gamma
@@ -532,6 +532,10 @@ int main(int argc, char** argv) {
       m.vertex.host_vertex_shader_type = Shader::HostVertexShaderType::kPointListAsTriangleStrip;
       m.vertex.output_point_parameters = 1;
       variants.emplace_back("point", m);
+      m.vertex.output_point_parameters = 0;
+      m.vertex.host_vertex_shader_type =
+          Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
+      variants.emplace_back("rectangle", m);
     } else {
       WgslShaderTranslator::Modification m;
       m.pixel.interpolator_mask = 0xFFFF;

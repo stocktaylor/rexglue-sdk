@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string_view>
 
@@ -35,6 +36,11 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 
+REXCVAR_DEFINE_INT32(gpu_capture_frame, 0, "GPU",
+                     "Save the guest output of this frame (counting swaps from 1) as a BMP, for "
+                     "comparing backends");
+REXCVAR_DEFINE_STRING(gpu_capture_path, "gpu_frame.bmp", "GPU",
+                      "Where gpu_capture_frame saves the frame");
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU",
                     "Enable vertical sync: guest frame pacing, and presenting without tearing");
 
@@ -927,6 +933,50 @@ bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader, 
   return true;
 }
 
+void CommandProcessor::CaptureGuestOutputToFile(const std::string& path) {
+  ui::Presenter* presenter = graphics_system_ ? graphics_system_->presenter() : nullptr;
+  ui::RawImage image;
+  if (!presenter || !presenter->CaptureGuestOutput(image)) {
+    REXGPU_ERROR("Couldn't capture frame {}", capture_swap_count_);
+    return;
+  }
+  FILE* file = std::fopen(path.c_str(), "wb");
+  if (!file) {
+    REXGPU_ERROR("Couldn't open {} to save frame {}", path, capture_swap_count_);
+    return;
+  }
+  // 24-bit BMP, bottom-up.
+  uint32_t row_padded = (image.width * 3 + 3) & ~uint32_t(3);
+  uint32_t data_size = row_padded * image.height;
+  uint8_t header[54] = {'B', 'M'};
+  auto put32 = [&](int at, uint32_t v) {
+    for (int i = 0; i < 4; ++i) {
+      header[at + i] = uint8_t(v >> (8 * i));
+    }
+  };
+  put32(2, 54 + data_size);
+  put32(10, 54);
+  put32(14, 40);
+  put32(18, image.width);
+  put32(22, image.height);
+  header[26] = 1;
+  header[28] = 24;
+  put32(34, data_size);
+  std::fwrite(header, 1, sizeof(header), file);
+  std::vector<uint8_t> row(row_padded, 0);
+  for (uint32_t y = image.height; y-- > 0;) {
+    const uint8_t* source = image.data.data() + image.stride * y;
+    for (uint32_t x = 0; x < image.width; ++x) {
+      row[x * 3 + 0] = source[x * 4 + 2];
+      row[x * 3 + 1] = source[x * 4 + 1];
+      row[x * 3 + 2] = source[x * 4 + 0];
+    }
+    std::fwrite(row.data(), 1, row.size(), file);
+  }
+  std::fclose(file);
+  REXGPU_INFO("Saved frame {} to {}", capture_swap_count_, path);
+}
+
 bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, uint32_t packet,
                                                   uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
@@ -960,6 +1010,10 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+
+  if (++capture_swap_count_ == uint64_t(std::max(REXCVAR_GET(gpu_capture_frame), 0))) {
+    CaptureGuestOutputToFile(REXCVAR_GET(gpu_capture_path));
+  }
 
   ++counter_;
   return true;

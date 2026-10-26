@@ -12,10 +12,9 @@
 #include <rex/graphics/webgpu/command_processor.h>
 
 #include <algorithm>
-#include <cstdio>
+#include <array>
 #include <cstring>
 
-#include <rex/cvar.h>
 #include <rex/graphics/graphics_system.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/webgpu/graphics_system.h>
@@ -26,51 +25,7 @@
 #include <rex/ui/webgpu/presenter.h>
 #include <rex/ui/webgpu/provider.h>
 
-REXCVAR_DEFINE_INT32(webgpu_capture_frame, 0, "GPU/WebGPU",
-                     "Bring-up: save the guest output of this frame (counting from 1) as a BMP");
-REXCVAR_DEFINE_STRING(webgpu_capture_path, "webgpu_frame.bmp", "GPU/WebGPU",
-                      "Where webgpu_capture_frame saves the frame");
-
 namespace rex::graphics::webgpu {
-
-namespace {
-
-void WriteBmp(const std::string& path, const ui::RawImage& image) {
-  FILE* file = std::fopen(path.c_str(), "wb");
-  if (!file) {
-    return;
-  }
-  uint32_t row = image.width * 3, padded = (row + 3) & ~3u;
-  uint32_t data_size = padded * image.height;
-  uint8_t header[54] = {'B', 'M'};
-  auto put32 = [&](int at, uint32_t v) {
-    for (int i = 0; i < 4; ++i) {
-      header[at + i] = uint8_t(v >> (8 * i));
-    }
-  };
-  put32(2, 54 + data_size);
-  put32(10, 54);
-  put32(14, 40);
-  put32(18, image.width);
-  put32(22, image.height);
-  header[26] = 1;
-  header[28] = 24;
-  put32(34, data_size);
-  std::fwrite(header, 1, 54, file);
-  std::vector<uint8_t> line(padded, 0);
-  for (uint32_t y = image.height; y-- > 0;) {
-    const uint8_t* source = image.data.data() + image.stride * y;
-    for (uint32_t x = 0; x < image.width; ++x) {
-      line[x * 3 + 0] = source[x * 4 + 2];
-      line[x * 3 + 1] = source[x * 4 + 1];
-      line[x * 3 + 2] = source[x * 4 + 0];
-    }
-    std::fwrite(line.data(), 1, padded, file);
-  }
-  std::fclose(file);
-}
-
-}  // namespace
 
 using SystemConstants = WgslShaderTranslator::SystemConstants;
 
@@ -110,6 +65,11 @@ bool WebGPUCommandProcessor::SetupContext() {
     return false;
   }
   render_target_cache_ = std::make_unique<WebGPURenderTargetCache>(*this);
+  texture_cache_ = std::make_unique<WebGPUTextureCache>(*register_file_, *shared_memory_, *this);
+  if (!texture_cache_->Initialize()) {
+    return false;
+  }
+  texture_cache_->BeginSubmission(1);
 
   device_thread_->Call([&] {
     WGPUBindGroupEntry entry = WGPU_BIND_GROUP_ENTRY_INIT;
@@ -129,6 +89,10 @@ void WebGPUCommandProcessor::ShutdownContext() {
   if (device_thread_ && command_list_) {
     Flush();
     AwaitSubmissions(0);
+    // Textures release after the commands recorded before them.
+    texture_cache_.reset();
+    Flush();
+    AwaitSubmissions(0);
   }
   if (device_thread_) {
     WGPUBindGroup bind_group = shared_memory_bind_group_;
@@ -144,6 +108,7 @@ void WebGPUCommandProcessor::ShutdownContext() {
   }
   shared_memory_bind_group_ = nullptr;
   resolved_texture_ = nullptr;
+  texture_cache_.reset();
   render_target_cache_.reset();
   pipeline_cache_.reset();
   primitive_processor_.reset();
@@ -151,6 +116,23 @@ void WebGPUCommandProcessor::ShutdownContext() {
   shaders_.clear();
   command_list_.reset();
   CommandProcessor::ShutdownContext();
+}
+
+void WebGPUCommandProcessor::ReleaseAfterRecordedCommands(std::function<void()> release) {
+  if (command_list_) {
+    command_list_->Record([release](WebGPUCommandList::Encoder&) { release(); });
+  } else if (device_thread_) {
+    device_thread_->Post(std::move(release));
+  }
+}
+
+void WebGPUCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  CommandProcessor::WriteRegister(index, value);
+  if (index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+      index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5 && texture_cache_) {
+    texture_cache_->TextureFetchConstantWritten((index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) /
+                                                6);
+  }
 }
 
 void WebGPUCommandProcessor::EndRenderPass() {
@@ -259,6 +241,7 @@ void WebGPUCommandProcessor::Flush() {
   auto list = std::shared_ptr<WebGPUCommandList>(command_list_.release());
   command_list_ = std::make_unique<WebGPUCommandList>();
   ++submissions_flushed_;
+  texture_cache_->BeginSubmission(submissions_flushed_ + 1);
   WGPUBindGroupLayout constants_layout = pipeline_cache_->constants_layout();
   device_thread_->Post([this, list, constants_layout] {
     const ui::webgpu::WebGPUDevice& device = device_thread_->device();
@@ -441,12 +424,16 @@ void WebGPUCommandProcessor::UpdateSystemConstants(
     constants.point_screen_diameter_to_ndc_radius[1] =
         1.0f / float(std::max(viewport_info.xy_extent[1], uint32_t(1)));
   }
-  // Placeholder textures until the texture cache: unsigned, identity swizzle.
+  // Texture signs and swizzles (the guest's and the host format's; WebGPU
+  // views can't swizzle).
   constants.textures_resolution_scaled = 0;
   std::memset(constants.texture_swizzled_signs, 0, sizeof(constants.texture_swizzled_signs));
-  const uint32_t identity_swizzle = 0 | (1 << 3) | (2 << 6) | (3 << 9);
-  for (uint32_t& swizzles : constants.texture_swizzles) {
-    swizzles = identity_swizzle | (identity_swizzle << 12);
+  std::memset(constants.texture_swizzles, 0, sizeof(constants.texture_swizzles));
+  for (uint32_t i = 0; i < xenos::kTextureFetchConstantCount; ++i) {
+    constants.texture_swizzled_signs[i >> 2] |=
+        uint32_t(texture_cache_->GetActiveTextureSwizzledSigns(i)) << (8 * (i & 3));
+    constants.texture_swizzles[i >> 1] |= texture_cache_->GetActiveTextureHostSwizzle(i)
+                                          << (12 * (i & 1));
   }
   constants.alpha_test_reference = regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
   constants.alpha_to_mask =
@@ -670,6 +657,13 @@ bool WebGPUCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   scissor.extent[0] = std::min(scissor.extent[0], any_target->width - scissor.offset[0]);
   scissor.extent[1] = std::min(scissor.extent[1], any_target->height - scissor.offset[1]);
 
+  // Textures first: the system constants take their swizzles and signs.
+  uint32_t used_texture_mask = vertex_shader->GetUsedTextureMaskAfterTranslation();
+  if (pixel_shader) {
+    used_texture_mask |= pixel_shader->GetUsedTextureMaskAfterTranslation();
+  }
+  texture_cache_->RequestTextures(used_texture_mask);
+
   // Constants.
   UpdateSystemConstants(primitive_processing_result, primitive_polygonal, viewport_info);
   uint32_t constant_offsets[WgslShaderTranslator::kConstantBufferCount];
@@ -708,6 +702,30 @@ bool WebGPUCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       WriteConstants(WgslShaderTranslator::kConstantBufferFetch,
                      &regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], 6 * 32 * sizeof(uint32_t));
 
+  // Textures and the bindings to them (loads end passes too).
+  struct StageTextures {
+    WGPUBindGroupLayout layout = nullptr;
+    std::vector<WGPUTextureView> views;
+    std::vector<WGPUSampler> samplers;
+  };
+  auto stage_textures = std::make_shared<std::array<StageTextures, 2>>();
+  for (uint32_t stage = 0; stage < 2; ++stage) {
+    const WgslShader* shader = stage ? pixel_shader : vertex_shader;
+    StageTextures& textures = (*stage_textures)[stage];
+    textures.layout = stage ? objects.textures_pixel_layout : objects.textures_vertex_layout;
+    if (!shader || !textures.layout) {
+      textures.layout = nullptr;
+      continue;
+    }
+    for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+      textures.views.push_back(texture_cache_->GetActiveBindingOrNullView(
+          binding.fetch_constant, binding.dimension, binding.is_signed));
+    }
+    for (const auto& binding : shader->GetSamplerBindingsAfterTranslation()) {
+      textures.samplers.push_back(texture_cache_->GetSampler(binding));
+    }
+  }
+
   // Memory the draw reads, uploaded before the pass (copies end passes).
   if (!RequestVertexBuffers(*vertex_shader)) {
     return false;
@@ -743,8 +761,7 @@ bool WebGPUCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   BeginRenderPass(colors, depth);
   WGPURenderPipeline pipeline = objects.pipeline;
   WGPUBindGroup shared_memory_bind_group = shared_memory_bind_group_;
-  WGPUBindGroup textures_vertex = objects.textures_vertex;
-  WGPUBindGroup textures_pixel = objects.textures_pixel;
+  WGPUBindGroup textures_empty = objects.textures_empty;
   uint32_t vertex_count = primitive_processing_result.host_draw_vertex_count;
   WGPUColor blend_constant = {
       regs.Get<float>(XE_GPU_REG_RB_BLEND_RED), regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
@@ -758,10 +775,35 @@ bool WebGPUCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     wgpuRenderPassEncoderSetBindGroup(pass, WgslShaderTranslator::kBindGroupConstants,
                                       encoder.constants, WgslShaderTranslator::kConstantBufferCount,
                                       constant_offsets);
-    wgpuRenderPassEncoderSetBindGroup(pass, WgslShaderTranslator::kBindGroupTexturesVertex,
-                                      textures_vertex, 0, nullptr);
-    wgpuRenderPassEncoderSetBindGroup(pass, WgslShaderTranslator::kBindGroupTexturesPixel,
-                                      textures_pixel, 0, nullptr);
+    // Texture bind groups from the views and samplers chosen at recording.
+    for (uint32_t stage = 0; stage < 2; ++stage) {
+      const StageTextures& textures = (*stage_textures)[stage];
+      uint32_t group = stage ? WgslShaderTranslator::kBindGroupTexturesPixel
+                             : WgslShaderTranslator::kBindGroupTexturesVertex;
+      if (!textures.layout) {
+        wgpuRenderPassEncoderSetBindGroup(pass, group, textures_empty, 0, nullptr);
+        continue;
+      }
+      std::vector<WGPUBindGroupEntry> entries;
+      for (size_t i = 0; i < textures.views.size(); ++i) {
+        WGPUBindGroupEntry& entry = entries.emplace_back(WGPU_BIND_GROUP_ENTRY_INIT);
+        entry.binding = uint32_t(i);
+        entry.textureView = textures.views[i];
+      }
+      for (size_t i = 0; i < textures.samplers.size(); ++i) {
+        WGPUBindGroupEntry& entry = entries.emplace_back(WGPU_BIND_GROUP_ENTRY_INIT);
+        entry.binding = uint32_t(textures.views.size() + i);
+        entry.sampler = textures.samplers[i];
+      }
+      WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+      group_desc.layout = textures.layout;
+      group_desc.entryCount = entries.size();
+      group_desc.entries = entries.data();
+      WGPUBindGroup bind_group = wgpuDeviceCreateBindGroup(encoder.device, &group_desc);
+      wgpuRenderPassEncoderSetBindGroup(pass, group, bind_group, 0, nullptr);
+      // The pass holds a reference.
+      wgpuBindGroupRelease(bind_group);
+    }
     wgpuRenderPassEncoderSetViewport(
         pass, float(viewport_info.xy_offset[0]), float(viewport_info.xy_offset[1]),
         float(viewport_info.xy_extent[0]), float(viewport_info.xy_extent[1]), viewport_info.z_min,
@@ -891,6 +933,8 @@ void WebGPUCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   Flush();
   // Keep the GPU thread at most two frames ahead of the GPU.
   AwaitSubmissions(2);
+  texture_cache_->CompletedSubmissionUpdated(submissions_completed_.load());
+  texture_cache_->BeginFrame();
 
   if (++statistics_frames_ == kStatisticsFrames) {
     REXGPU_INFO(
@@ -949,16 +993,6 @@ void WebGPUCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         wgpuCommandEncoderRelease(encoder);
         return true;
       });
-
-  if (++frame_count_ == uint64_t(std::max(REXCVAR_GET(webgpu_capture_frame), 0))) {
-    ui::RawImage image;
-    if (presenter->CaptureGuestOutput(image)) {
-      WriteBmp(REXCVAR_GET(webgpu_capture_path), image);
-      REXGPU_INFO("WebGPU: saved frame {} to {}", frame_count_, REXCVAR_GET(webgpu_capture_path));
-    } else {
-      REXGPU_ERROR("WebGPU: couldn't capture frame {}", frame_count_);
-    }
-  }
 }
 
 }  // namespace rex::graphics::webgpu

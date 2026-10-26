@@ -225,6 +225,10 @@ class CommandProcessor {
   // implementations.
   SwapPostEffect GetActualSwapPostEffect() const { return swap_post_effect_actual_; }
 
+  // gpu_capture_frame: the presenter's guest output as a BMP.
+  void CaptureGuestOutputToFile(const std::string& path);
+  uint64_t capture_swap_count_ = 0;
+
   // Shared readback resolve mode with backend legacy-flag alias support.
   ReadbackResolveMode GetReadbackResolveMode(bool legacy_readback_resolve_enabled) const;
   // Shared memexport readback enable state with backend legacy-flag override support.

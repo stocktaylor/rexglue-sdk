@@ -13,6 +13,8 @@
 
 #include <cstring>
 
+#include <rex/cvar.h>
+#include <rex/graphics/flags.h>
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/util/draw.h>
 #include <rex/graphics/webgpu/command_list.h>
@@ -349,6 +351,9 @@ bool WebGPUPipelineCache::EnsureTranslated(WgslShader::WgslTranslation& translat
     return false;
   }
   auto it = modules_.find(&translation);
+  if (it == modules_.end() && !REXCVAR_GET(dump_shaders).empty()) {
+    translation.Dump(REXCVAR_GET(dump_shaders), "webgpu");
+  }
   if (it == modules_.end()) {
     std::string wgsl = translation.GetTranslatedBinaryString();
     WGPUShaderModule module = nullptr;
@@ -448,13 +453,14 @@ bool WebGPUPipelineCache::GetDrawObjects(const PipelineKey& key,
         return false;
       }
       objects_out.pipeline = pipeline.pipeline;
-      // Bind groups exist once a pipeline with the shaders does.
-      objects_out.textures_vertex = shader_textures_.count(&vertex_shader)
-                                        ? shader_textures_[&vertex_shader].bind_group
-                                        : no_textures_vertex_.bind_group;
-      objects_out.textures_pixel = pixel_shader && shader_textures_.count(pixel_shader)
-                                       ? shader_textures_[pixel_shader].bind_group
-                                       : no_textures_pixel_.bind_group;
+      // Layouts exist once a pipeline with the shaders does.
+      objects_out.textures_vertex_layout = shader_textures_.count(&vertex_shader)
+                                               ? shader_textures_[&vertex_shader].layout
+                                               : nullptr;
+      objects_out.textures_pixel_layout = pixel_shader && shader_textures_.count(pixel_shader)
+                                              ? shader_textures_[pixel_shader].layout
+                                              : nullptr;
+      objects_out.textures_empty = no_textures_vertex_.bind_group;
       return true;
     }
   }
@@ -466,8 +472,11 @@ bool WebGPUPipelineCache::GetDrawObjects(const PipelineKey& key,
     const ShaderTextures& textures_vertex = GetShaderTextures(vertex_shader);
     const ShaderTextures& textures_pixel =
         pixel_shader ? GetShaderTextures(*pixel_shader) : no_textures_pixel_;
-    objects_out.textures_vertex = textures_vertex.bind_group;
-    objects_out.textures_pixel = textures_pixel.bind_group;
+    objects_out.textures_vertex_layout =
+        &textures_vertex != &no_textures_vertex_ ? textures_vertex.layout : nullptr;
+    objects_out.textures_pixel_layout =
+        &textures_pixel != &no_textures_pixel_ ? textures_pixel.layout : nullptr;
+    objects_out.textures_empty = no_textures_vertex_.bind_group;
     pipeline = CreatePipeline(key, vertex_module, pixel_module, textures_vertex.layout,
                               textures_pixel.layout);
   });

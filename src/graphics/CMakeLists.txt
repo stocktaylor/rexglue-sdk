@@ -110,6 +110,7 @@ set(REXGPU_XENOS_WEBGPU_SOURCES
     webgpu/primitive_processor.cpp
     webgpu/render_target_cache.cpp
     webgpu/shared_memory.cpp
+    webgpu/texture_cache.cpp
 )
 
 if(REXGLUE_USE_WEBGPU)

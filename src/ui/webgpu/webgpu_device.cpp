@@ -37,6 +37,7 @@ constexpr WGPUFeatureName kOptionalFeatures[] = {
     WGPUFeatureName_ClipDistances,         // user clip planes
     WGPUFeatureName_DepthClipControl,      // depth clamp without clipping
     WGPUFeatureName_Float32Blendable,      //
+    WGPUFeatureName_Float32Filterable,     // 32-bit float and depth textures
     WGPUFeatureName_TextureCompressionBC,  // DXT textures without decompressing
     WGPUFeatureName_PrimitiveIndex,        //
 };

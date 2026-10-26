@@ -28,6 +28,7 @@
 #include <rex/graphics/webgpu/primitive_processor.h>
 #include <rex/graphics/webgpu/render_target_cache.h>
 #include <rex/graphics/webgpu/shared_memory.h>
+#include <rex/graphics/webgpu/texture_cache.h>
 #include <rex/ui/webgpu/device_thread.h>
 
 namespace rex::graphics::webgpu {
@@ -56,9 +57,15 @@ class WebGPUCommandProcessor : public CommandProcessor {
   // Waits until at most `max_pending` submissions are executing.
   void AwaitSubmissions(uint64_t max_pending);
 
+  // Runs `release` on the device thread after the commands recorded so far
+  // (with no command list, after the work already handed over).
+  void ReleaseAfterRecordedCommands(std::function<void()> release);
+
  protected:
   bool SetupContext() override;
   void ShutdownContext() override;
+
+  void WriteRegister(uint32_t index, uint32_t value) override;
 
   Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                      const uint32_t* host_address, uint32_t dword_count) override;
@@ -100,6 +107,7 @@ class WebGPUCommandProcessor : public CommandProcessor {
   std::unique_ptr<WebGPUPrimitiveProcessor> primitive_processor_;
   std::unique_ptr<WebGPUPipelineCache> pipeline_cache_;
   std::unique_ptr<WebGPURenderTargetCache> render_target_cache_;
+  std::unique_ptr<WebGPUTextureCache> texture_cache_;
   WGPUBindGroup shared_memory_bind_group_ = nullptr;
 
   WgslShaderTranslator::SystemConstants system_constants_;
@@ -116,8 +124,6 @@ class WebGPUCommandProcessor : public CommandProcessor {
   WGPUTextureFormat resolved_format_ = WGPUTextureFormat_Undefined;
   uint32_t resolved_width_ = 0;
   uint32_t resolved_height_ = 0;
-
-  uint64_t frame_count_ = 0;
 
   // Bring-up statistics, logged every kStatisticsFrames frames.
   static constexpr uint32_t kStatisticsFrames = 300;

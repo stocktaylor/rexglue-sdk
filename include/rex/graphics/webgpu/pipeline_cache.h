@@ -81,11 +81,14 @@ class WebGPUPipelineCache {
   bool EnsureTranslated(WgslShader::WgslTranslation& translation);
 
   // Device-thread objects for a draw. The pipeline is nullptr if it couldn't
-  // be created. The texture bind groups use placeholder textures for now.
+  // be created. A stage with texture bindings gets its layout (the draw
+  // creates the bind group from the texture cache's views and samplers), one
+  // without gets an empty bind group.
   struct DrawObjects {
     WGPURenderPipeline pipeline = nullptr;
-    WGPUBindGroup textures_vertex = nullptr;
-    WGPUBindGroup textures_pixel = nullptr;
+    WGPUBindGroupLayout textures_vertex_layout = nullptr;
+    WGPUBindGroupLayout textures_pixel_layout = nullptr;
+    WGPUBindGroup textures_empty = nullptr;
   };
   bool GetDrawObjects(const PipelineKey& key, WgslShader::WgslTranslation& vertex_translation,
                       WgslShader::WgslTranslation* pixel_translation, DrawObjects& objects_out);

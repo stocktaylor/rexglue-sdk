@@ -101,8 +101,17 @@ if(REXGLUE_USE_VULKAN)
     list(APPEND REXGPU_XENOS_SOURCES ${REXGPU_XENOS_SPIRV_SOURCES} ${REXGPU_XENOS_VULKAN_SOURCES})
 endif()
 
+# WebGPU backend
+set(REXGPU_XENOS_WEBGPU_SOURCES
+    webgpu/command_list.cpp
+    webgpu/command_processor.cpp
+    webgpu/graphics_system.cpp
+    webgpu/primitive_processor.cpp
+    webgpu/shared_memory.cpp
+)
+
 if(REXGLUE_USE_WEBGPU)
-    list(APPEND REXGPU_XENOS_SOURCES ${REXGPU_XENOS_WGSL_SOURCES})
+    list(APPEND REXGPU_XENOS_SOURCES ${REXGPU_XENOS_WGSL_SOURCES} ${REXGPU_XENOS_WEBGPU_SOURCES})
 endif()
 
 if(REXGLUE_USE_D3D12)
@@ -153,10 +162,18 @@ target_link_libraries(rexgpu-xenos PRIVATE
     rexruntime
     xxHash::xxhash
 )
-# The null GPU can present through WebGPU; the provider comes from the runtime
-# (ui/webgpu/factory.h), so the plugin needs no WebGPU headers or Dawn.
+# The WebGPU backend, and the null GPU presenting through WebGPU. Natively the
+# runtime links Dawn (statically) and exports its wgpu* functions, so the plugin
+# takes only the headers: a second Dawn in the process couldn't use the
+# runtime's device. In wasm everything links into one module with the port.
 if(REXGLUE_USE_WEBGPU)
     target_compile_definitions(rexgpu-xenos PRIVATE REXGLUE_HAS_WEBGPU_RUNTIME=1)
+    if(EMSCRIPTEN)
+        target_link_libraries(rexgpu-xenos PRIVATE rex::webgpu)
+    else()
+        target_include_directories(rexgpu-xenos PRIVATE
+            $<TARGET_PROPERTY:dawn::webgpu_dawn,INTERFACE_INCLUDE_DIRECTORIES>)
+    endif()
 endif()
 
 if(REXGLUE_USE_VULKAN)

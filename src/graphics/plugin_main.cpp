@@ -21,6 +21,9 @@
 #if REX_HAS_VULKAN
 #include <rex/graphics/vulkan/graphics_system.h>
 #endif
+#if REXGLUE_HAS_WEBGPU_RUNTIME
+#include <rex/graphics/webgpu/graphics_system.h>
+#endif
 
 extern "C" REX_GPU_PLUGIN_EXPORT uint32_t rex_gpu_abi_version(void) {
   return rex::system::kGpuPluginAbiVersion;
@@ -39,6 +42,12 @@ extern "C" REX_GPU_PLUGIN_EXPORT rex::system::IGraphicsSystem* rex_gpu_create(
   }
 
   std::string_view backend = info->backend ? info->backend : "any";
+#if REXGLUE_HAS_WEBGPU_RUNTIME
+  // In development: only when asked for.
+  if (backend == "webgpu") {
+    return new rex::graphics::webgpu::WebGPUGraphicsSystem();
+  }
+#endif
 #if REX_HAS_D3D12
   if (backend == "any" || backend == "d3d12") {
     return new rex::graphics::d3d12::D3D12GraphicsSystem();

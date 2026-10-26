@@ -45,7 +45,8 @@ constexpr const char kSystemConstantsWgsl[] = R"(struct XeSystemConstants {
   point_screen_diameter_to_ndc_radius: vec2f,
   textures_resolution_scaled: u32,
   alpha_test_reference: f32,
-  padding_1: vec2u,
+  alpha_to_mask: u32,
+  padding_1: u32,
   texture_swizzled_signs: array<vec4u, 2>,
   texture_swizzles: array<vec4u, 4>,
   color_exp_bias: vec4f,
@@ -89,6 +90,8 @@ void WgslShaderTranslator::Reset() {
   uses_bool_loop_constants_ = false;
   uses_fetch_constants_ = false;
   uses_pwl_gamma_to_linear_ = false;
+  uses_linear_to_pwl_gamma_ = false;
+  uses_float24_depth_ = false;
   uses_fragment_coordinates_ = false;
   uses_front_facing_ = false;
   uses_point_coordinates_ = false;
@@ -174,7 +177,7 @@ void WgslShaderTranslator::StartTranslation() {
   if (is_vertex_shader()) {
     Line("var xe_out: XeVertexOutput;");
     Line("var xe_pos = vec4f(0.0f);");
-  } else if (current_shader().writes_color_targets() || current_shader().writes_depth()) {
+  } else if (HasFragmentOutput()) {
     Line("var xe_out: XeFragmentOutput;");
   }
   if (register_count()) {
@@ -230,8 +233,7 @@ std::vector<uint8_t> WgslShaderTranslator::CompleteTranslation() {
 
   std::string wgsl = BuildDeclarations();
   wgsl += body_;
-  if (is_vertex_shader() || current_shader().writes_color_targets() ||
-      current_shader().writes_depth()) {
+  if (is_vertex_shader() || HasFragmentOutput()) {
     wgsl += "  return xe_out;\n";
   }
   wgsl += "}\n";
@@ -327,6 +329,53 @@ std::string WgslShaderTranslator::BuildDeclarations() const {
     out += "\n";
   }
 
+  if (uses_linear_to_pwl_gamma_) {
+    // As SpirvShaderTranslator::LinearToPWLGamma.
+    out +=
+        "fn xe_linear_to_pwl_gamma(linear_unclamped: vec3f) -> vec3f {\n"
+        "  let value = select(vec3f(0.0f), min(linear_unclamped, vec3f(1.0f)),\n"
+        "                     linear_unclamped >= vec3f(0.0f));\n"
+        "  let piece_3 = value >= vec3f(512.0f / 1023.0f);\n"
+        "  let piece_1 = value >= vec3f(64.0f / 1023.0f);\n"
+        "  let piece_2 = value >= vec3f(128.0f / 1023.0f);\n"
+        "  let scale = select(select(vec3f(1023.0f), vec3f(1023.0f / 2.0f), piece_1),\n"
+        "                     select(vec3f(1023.0f / 4.0f), vec3f(1023.0f / 8.0f), piece_3),\n"
+        "                     piece_2);\n"
+        "  let offset = select(select(vec3f(0.0f), vec3f(32.0f / 255.0f), piece_1),\n"
+        "                      select(vec3f(64.0f / 255.0f), vec3f(128.0f / 255.0f), piece_3),\n"
+        "                      piece_2);\n"
+        "  return trunc(value * scale) * (1.0f / 255.0f) + offset;\n"
+        "}\n\n";
+  }
+  if (uses_float24_depth_) {
+    // Guest [0, 1] depth to float24 and back to the host [0, 0.5] range, as
+    // SpirvShaderTranslator::PreClampedDepthTo20e4 and Depth20e4To32.
+    bool round_to_nearest_even =
+        modification.pixel.depth_stencil_mode == Modification::DepthStencilMode::kFloat24Rounding;
+    out += fmt::format(
+        "fn xe_depth_to_float24_host(depth: f32) -> f32 {{\n"
+        "  let f32_bits = bitcast<u32>(depth) & 0x7FFFFFFFu;  // -0 as 0\n"
+        "  let denormal_biased = insertBits(f32_bits, 1u, 23u, 9u) >>\n"
+        "                        min(113u - (f32_bits >> 23u), 24u);\n"
+        "  let normal_biased = f32_bits - (112u << 23u);\n"
+        "  var biased = select(normal_biased, denormal_biased, f32_bits < 0x38800000u);\n"
+        "{}"
+        "  let f24 = extractBits(biased, 3u, 24u);\n"
+        "  let f24_exponent = extractBits(f24, 20u, 4u);\n"
+        "  let f24_mantissa = extractBits(f24, 0u, 20u);\n"
+        "  let mantissa_msb = firstLeadingBit(f24_mantissa);\n"
+        "  let mantissa_nonzero = f24_mantissa != 0u;\n"
+        "  let denormal_exponent = select(0x{:08X}u, mantissa_msb - 19u, mantissa_nonzero);\n"
+        "  let denormal_mantissa = select(0u, f24_mantissa << (20u - mantissa_msb), "
+        "mantissa_nonzero);\n"
+        "  let is_normal = f24_exponent != 0u;\n"
+        "  let exponent = select(denormal_exponent, f24_exponent, is_normal);\n"
+        "  let mantissa = select(denormal_mantissa, f24_mantissa, is_normal);\n"
+        "  return bitcast<f32>(insertBits(mantissa, exponent + 111u, 20u, 8u) << 3u);\n"
+        "}}\n\n",
+        round_to_nearest_even ? "  biased = biased + 3u + extractBits(biased, 3u, 1u);\n" : "",
+        uint32_t(-int32_t(111)));
+  }
   if (uses_pwl_gamma_to_linear_) {
     // As SpirvShaderTranslator::PWLGammaToLinear.
     out +=
@@ -382,7 +431,7 @@ std::string WgslShaderTranslator::BuildDeclarations() const {
     out += "}\n\n";
     out += "@vertex\nfn main(@builtin(vertex_index) xe_vertex_index: u32) -> XeVertexOutput {\n";
   } else {
-    bool has_output = current_shader().writes_color_targets() || current_shader().writes_depth();
+    bool has_output = HasFragmentOutput();
     if (has_output) {
       out += "struct XeFragmentOutput {\n";
       for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
@@ -390,8 +439,11 @@ std::string WgslShaderTranslator::BuildDeclarations() const {
           out += fmt::format("  @location({}) c{}: vec4f,\n", i, i);
         }
       }
-      if (current_shader().writes_depth()) {
+      if (HasFragmentDepthOutput()) {
         out += "  @builtin(frag_depth) depth: f32,\n";
+      }
+      if (IsAlphaToCoveragePossible()) {
+        out += "  @builtin(sample_mask) sample_mask: u32,\n";
       }
       out += "}\n\n";
     }
@@ -401,6 +453,9 @@ std::string WgslShaderTranslator::BuildDeclarations() const {
     }
     if (uses_front_facing_) {
       inputs.push_back("@builtin(front_facing) xe_front_facing: bool");
+    }
+    if (IsSampleRate()) {
+      inputs.push_back("@builtin(sample_index) xe_sample_index: u32");
     }
     uint32_t location = 0;
     uint32_t interpolators_remaining = interpolator_mask;
@@ -577,8 +632,101 @@ void WgslShaderTranslator::StartPixelShaderInMain() {
 }
 
 void WgslShaderTranslator::CompletePixelShaderInMain() {
-  // Render target output conversion (alpha test, exponent bias, gamma, float24
-  // depth) comes with the render target cache.
+  // The host render target path of the SPIR-V translator (no fragment shader
+  // interlock in WebGPU). Kills are already done: WGSL's discard demotes.
+  uint32_t color_targets_written = current_shader().writes_color_targets();
+
+  if (IsAlphaToCoveragePossible()) {
+    Line("xe_out.sample_mask = 0xFFFFFFFFu;");
+
+    // Alpha test on render target 0's alpha.
+    Line(fmt::format("let xe_alpha_test_function = extractBits(xe_system.flags, {}u, 3u);",
+                     uint32_t(kSysFlag_AlphaPassIfLess_Shift)));
+    OpenScope(fmt::format("if (xe_alpha_test_function != {}u)",
+                          uint32_t(xenos::CompareFunction::kAlways)));
+    Line("let xe_alpha = xe_out.c0.w;");
+    Line("let xe_alpha_reference = xe_system.alpha_test_reference;");
+    // Not equal is unordered (passes for NaN), the others ordered.
+    Line(
+        fmt::format("let xe_alpha_test_passed = select("
+                    "(xe_alpha < xe_alpha_reference && (xe_alpha_test_function & 1u) != 0u) || "
+                    "(xe_alpha == xe_alpha_reference && (xe_alpha_test_function & 2u) != 0u) || "
+                    "(xe_alpha > xe_alpha_reference && (xe_alpha_test_function & 4u) != 0u), "
+                    "xe_alpha != xe_alpha_reference, xe_alpha_test_function == {}u);",
+                    uint32_t(xenos::CompareFunction::kNotEqual)));
+    OpenScope("if (!xe_alpha_test_passed)");
+    Line("discard;");
+    CloseScope();
+    CloseScope();
+
+    // Alpha to coverage with the guest's dithering: per sample, covered if
+    // alpha >= base - offset * scale, the offset (0-3) chosen by the pixel's
+    // position in a 2x2 quad. WebGPU has no 2x MSAA, so guest 2x uses host 4x
+    // samples 0 and 3 (as the Vulkan path without native 2x).
+    uses_fragment_coordinates_ = true;
+    OpenScope("if (xe_system.alpha_to_mask != 0u)");
+    Line("let xe_a2c_alpha = xe_out.c0.w;");
+    Line("let xe_a2c_position = vec2u(xe_frag_coord.xy);");
+    Line(
+        "let xe_a2c_offset = f32(extractBits(xe_system.alpha_to_mask, "
+        "((xe_a2c_position.x & 1u) | ((xe_a2c_position.y & 1u) << 1u)) << 1u, 2u));");
+    Line("var xe_a2c_mask = 0u;");
+    auto sample = [&](uint32_t host_sample, float threshold_base, float threshold_offset_scale) {
+      Line(fmt::format("xe_a2c_mask |= select(0u, {}u, xe_a2c_alpha >= {} - xe_a2c_offset * {});",
+                       UINT32_C(1) << host_sample, FloatConst(threshold_base, 1),
+                       FloatConst(threshold_offset_scale, 1)));
+    };
+    OpenScope(fmt::format("switch extractBits(xe_system.flags, {}u, 2u)",
+                          uint32_t(kSysFlag_MsaaSamples_Shift)));
+    OpenScope(fmt::format("case {}u:", uint32_t(xenos::MsaaSamples::k2X)));
+    sample(0, 0.5f, 1.0f / 8.0f);
+    sample(3, 1.0f, 1.0f / 8.0f);
+    CloseScope();
+    OpenScope(fmt::format("case {}u:", uint32_t(xenos::MsaaSamples::k4X)));
+    sample(0, 0.75f, 1.0f / 16.0f);
+    sample(2, 0.25f, 1.0f / 16.0f);
+    sample(1, 0.5f, 1.0f / 16.0f);
+    sample(3, 1.0f, 1.0f / 16.0f);
+    CloseScope();
+    OpenScope("default:");
+    sample(0, 1.0f, 1.0f / 4.0f);
+    CloseScope();
+    CloseScope();
+    OpenScope("if (xe_a2c_mask == 0u)");
+    Line("discard;");
+    CloseScope();
+    Line("xe_out.sample_mask = xe_a2c_mask;");
+    CloseScope();
+  }
+
+  // Color exponent bias, then gamma (before blending rather than after as on
+  // the Xbox 360, one of the host render target path's blending issues; done
+  // in the shader as in the Vulkan and D3D12 host render target paths).
+  uint32_t color_targets_remaining = color_targets_written;
+  uint32_t color_target_index;
+  while (rex::bit_scan_forward(color_targets_remaining, &color_target_index)) {
+    color_targets_remaining &= ~(UINT32_C(1) << color_target_index);
+    std::string color = fmt::format("xe_out.c{}", color_target_index);
+    Line(fmt::format("{} = {} * xe_system.color_exp_bias[{}];", color, color, color_target_index));
+    uses_linear_to_pwl_gamma_ = true;
+    OpenScope(fmt::format("if ((xe_system.flags & {}u) != 0u)",
+                          uint32_t(kSysFlag_ConvertColor0ToGamma) << color_target_index));
+    Line(fmt::format("{} = vec4f(xe_linear_to_pwl_gamma({}.rgb), {}.a);", color, color, color));
+    CloseScope();
+  }
+
+  if (IsWritingFloat24Depth()) {
+    // oDepth is already in guest [0, 1]; otherwise the host depth in [0, 0.5]
+    // is doubled back, per sample.
+    uses_float24_depth_ = true;
+    std::string depth = "xe_out.depth";
+    if (!current_shader().writes_depth()) {
+      uses_fragment_coordinates_ = true;
+      Line("_ = xe_sample_index;");
+      depth = Let("select(0.0f, min(xe_frag_coord.z * 2.0f, 1.0f), xe_frag_coord.z >= 0.0f)");
+    }
+    Line(fmt::format("xe_out.depth = xe_depth_to_float24_host({});", depth));
+  }
 }
 
 void WgslShaderTranslator::ProcessLabel(uint32_t cf_index) {

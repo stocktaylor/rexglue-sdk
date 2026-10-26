@@ -167,7 +167,10 @@ class WgslShaderTranslator : public ShaderTranslator {
     // texture.
     uint32_t textures_resolution_scaled;
     float alpha_test_reference;
-    uint32_t padding_1[2];
+    // Bits 0:7 - alpha-to-coverage dither offsets from RB_COLORCONTROL bits
+    // 24:31, bit 8 - whether alpha-to-coverage is enabled.
+    uint32_t alpha_to_mask;
+    uint32_t padding_1;
 
     // Each byte contains post-swizzle TextureSign values for each of the needed
     // components of each of the 32 used texture fetch constants.
@@ -289,6 +292,35 @@ class WgslShaderTranslator : public ShaderTranslator {
   // UINT32_MAX if PsParamGen doesn't need to be written.
   uint32_t GetPsParamGenInterpolator() const;
 
+  // Pixel shader output modes, as in the SPIR-V translator's host render
+  // target path. WGSL can't request early fragment tests, but with the hint
+  // the backend has alpha test and alpha to coverage off, so they're skipped.
+  bool IsEarlyFragmentTestsHint() const {
+    return is_pixel_shader() &&
+           GetWgslShaderModification().pixel.depth_stencil_mode ==
+               Modification::DepthStencilMode::kEarlyHint &&
+           current_shader().implicit_early_z_write_allowed();
+  }
+  bool IsWritingFloat24Depth() const {
+    Modification::DepthStencilMode depth_stencil_mode =
+        GetWgslShaderModification().pixel.depth_stencil_mode;
+    return is_pixel_shader() &&
+           (depth_stencil_mode == Modification::DepthStencilMode::kFloat24Truncating ||
+            depth_stencil_mode == Modification::DepthStencilMode::kFloat24Rounding);
+  }
+  // Float24 depth from the fragment depth is per sample.
+  bool IsSampleRate() const { return IsWritingFloat24Depth() && !current_shader().writes_depth(); }
+  bool IsAlphaToCoveragePossible() const {
+    return is_pixel_shader() && current_shader().writes_color_target(0) &&
+           !IsEarlyFragmentTestsHint();
+  }
+  bool HasFragmentDepthOutput() const {
+    return current_shader().writes_depth() || IsWritingFloat24Depth();
+  }
+  bool HasFragmentOutput() const {
+    return current_shader().writes_color_targets() || HasFragmentDepthOutput();
+  }
+
   // Code emission.
   void Line(const std::string& text);
   void OpenScope(const std::string& header);
@@ -401,6 +433,8 @@ class WgslShaderTranslator : public ShaderTranslator {
   bool uses_bool_loop_constants_ = false;
   bool uses_fetch_constants_ = false;
   bool uses_pwl_gamma_to_linear_ = false;
+  bool uses_linear_to_pwl_gamma_ = false;
+  bool uses_float24_depth_ = false;
   bool uses_fragment_coordinates_ = false;
   bool uses_front_facing_ = false;
   bool uses_point_coordinates_ = false;

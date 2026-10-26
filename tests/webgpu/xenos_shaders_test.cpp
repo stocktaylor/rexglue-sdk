@@ -16,17 +16,21 @@
 // Vulkan and D3D12 backends), translates every shader with
 // WgslShaderTranslator under a few modifications covering the translator's
 // paths (host vertex shader types, PsParamGen, centroid interpolation, clip
-// distances), and has the device validate the WGSL: a shader module, then a
-// render pipeline with an automatic layout (vertex shaders alone, pixel
-// shaders behind a vertex shader with matching outputs). With --dump, each
-// rejected shader's WGSL and ucode disassembly go to DIR (every shader's with
-// --dump-all). An invalid shader is validated too, and must be rejected, so a
-// pass means the validation ran. --resolution-scale translates for a draw
-// resolution scale (the resolve-scaled texture and PsParamGen paths). Shaders
-// using more textures or samplers than WebGPU's default per-stage limit (16)
-// are counted, as they need devices with higher limits.
+// distances, early depth hint, float24 depth), and has the device validate the WGSL: a shader
+// module, then a render pipeline with an automatic layout (vertex shaders alone, pixel shaders
+// behind a vertex shader with matching outputs). With --dump, each rejected shader's WGSL and ucode
+// disassembly go to DIR (every shader's with
+// --dump-all). The translator's float24 depth and PWL gamma helpers, taken
+// from the translated shaders, also run in a compute shader over millions of
+// inputs, compared with the CPU versions in xenos.h (depth bit-exact, gamma
+// within 1e-6 as GPUs may fuse multiply-adds). An invalid shader is validated too, and must be
+// rejected, so a pass means the validation ran. --resolution-scale translates for a draw resolution
+// scale (the resolve-scaled texture and PsParamGen paths). Shaders using more textures or samplers
+// than WebGPU's default per-stage limit (16) are counted, as they need devices with higher limits.
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -44,6 +48,7 @@
 #include <rex/cvar.h>
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/pipeline/shader/wgsl.h>
+#include <rex/graphics/xenos.h>
 #include <rex/graphics/pipeline/shader/wgsl_translator.h>
 #include <rex/string/buffer.h>
 #include <rex/ui/webgpu/device_thread.h>
@@ -232,6 +237,232 @@ void Validate(WGPUDevice device, Run& run, size_t index) {
   wgpuShaderModuleRelease(module);
 }
 
+// The body of `fn name(...)` from translated WGSL, renamed, or empty.
+std::string ExtractFunction(const std::vector<Case>& cases, const char* variant, const char* name,
+                            const char* new_name) {
+  std::string signature = fmt::format("fn {}(", name);
+  for (const Case& c : cases) {
+    if (c.translation_failed || (variant && c.variant != variant)) {
+      continue;
+    }
+    size_t start = c.wgsl.find(signature);
+    if (start == std::string::npos) {
+      continue;
+    }
+    size_t end = c.wgsl.find("\n}\n", start);
+    std::string function = c.wgsl.substr(start, end + 3 - start);
+    function.replace(3, std::strlen(name), new_name);
+    return function;
+  }
+  return std::string();
+}
+
+struct HelperResults {
+  std::vector<float> outputs;  // 4 per input
+  bool ok = false;
+};
+
+// On the device thread: runs the helpers over the inputs, reading back the
+// results (set from the map callback, also on the device thread).
+void RunHelpers(WGPUDevice device, WGPUQueue queue, const std::string& wgsl,
+                const std::vector<float>& inputs, HelperResults& results,
+                std::promise<void>& done) {
+  uint64_t input_size = inputs.size() * sizeof(float);
+  uint64_t output_size = input_size * 4;
+  WGPUBufferDescriptor buffer_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
+  buffer_desc.size = input_size;
+  buffer_desc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+  WGPUBuffer input = wgpuDeviceCreateBuffer(device, &buffer_desc);
+  wgpuQueueWriteBuffer(queue, input, 0, inputs.data(), input_size);
+  buffer_desc.size = output_size;
+  buffer_desc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc;
+  WGPUBuffer output = wgpuDeviceCreateBuffer(device, &buffer_desc);
+  buffer_desc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+  WGPUBuffer readback = wgpuDeviceCreateBuffer(device, &buffer_desc);
+
+  WGPUShaderModule module = CreateModule(device, wgsl);
+  WGPUComputePipelineDescriptor pipeline_desc = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
+  pipeline_desc.compute.module = module;
+  pipeline_desc.compute.entryPoint = View("main");
+  WGPUComputePipeline pipeline = wgpuDeviceCreateComputePipeline(device, &pipeline_desc);
+  WGPUBindGroupEntry entries[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
+  entries[0].binding = 0;
+  entries[0].buffer = input;
+  entries[0].size = input_size;
+  entries[1].binding = 1;
+  entries[1].buffer = output;
+  entries[1].size = output_size;
+  WGPUBindGroupLayout layout = wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+  WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+  group_desc.layout = layout;
+  group_desc.entryCount = 2;
+  group_desc.entries = entries;
+  WGPUBindGroup group = wgpuDeviceCreateBindGroup(device, &group_desc);
+
+  WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
+  WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(encoder, nullptr);
+  wgpuComputePassEncoderSetPipeline(pass, pipeline);
+  wgpuComputePassEncoderSetBindGroup(pass, 0, group, 0, nullptr);
+  // In two dimensions: one is limited to 65535 workgroups.
+  uint32_t group_count = uint32_t((inputs.size() + 255) / 256);
+  uint32_t group_count_x = std::min(group_count, UINT32_C(32768));
+  wgpuComputePassEncoderDispatchWorkgroups(pass, group_count_x,
+                                           (group_count + group_count_x - 1) / group_count_x, 1);
+  wgpuComputePassEncoderEnd(pass);
+  wgpuCommandEncoderCopyBufferToBuffer(encoder, output, 0, readback, 0, output_size);
+  WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
+  wgpuQueueSubmit(queue, 1, &commands);
+
+  struct MapContext {
+    WGPUBuffer readback;
+    uint64_t size;
+    HelperResults* results;
+    std::promise<void>* done;
+  };
+  auto* context = new MapContext{readback, output_size, &results, &done};
+  WGPUBufferMapCallbackInfo map_callback = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+  map_callback.mode = kDeviceThreadCallbackMode;
+  map_callback.userdata1 = context;
+  map_callback.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* userdata1, void*) {
+    auto* context = static_cast<MapContext*>(userdata1);
+    if (status == WGPUMapAsyncStatus_Success) {
+      auto* data = static_cast<const float*>(
+          wgpuBufferGetConstMappedRange(context->readback, 0, context->size));
+      context->results->outputs.assign(data, data + context->size / sizeof(float));
+      context->results->ok = true;
+      wgpuBufferUnmap(context->readback);
+    }
+    wgpuBufferRelease(context->readback);
+    context->done->set_value();
+    delete context;
+  };
+  wgpuBufferMapAsync(readback, WGPUMapMode_Read, 0, output_size, map_callback);
+
+  wgpuCommandBufferRelease(commands);
+  wgpuComputePassEncoderRelease(pass);
+  wgpuCommandEncoderRelease(encoder);
+  wgpuBindGroupRelease(group);
+  wgpuBindGroupLayoutRelease(layout);
+  wgpuComputePipelineRelease(pipeline);
+  wgpuShaderModuleRelease(module);
+  wgpuBufferRelease(output);
+  wgpuBufferRelease(input);
+}
+
+uint32_t Bits(float value) {
+  uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+float FromBits(uint32_t bits) {
+  float value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+// Returns false on a mismatch or if the helpers couldn't be run.
+bool CheckHelpers(WebGPUDeviceThread& thread, const std::vector<Case>& cases) {
+  std::string depth_truncating =
+      ExtractFunction(cases, "param_gen_float24", "xe_depth_to_float24_host", "depth_truncating");
+  std::string depth_rounding = ExtractFunction(cases, "param_gen_point_float24",
+                                               "xe_depth_to_float24_host", "depth_rounding");
+  std::string gamma_to_linear =
+      ExtractFunction(cases, nullptr, "xe_pwl_gamma_to_linear", "gamma_to_linear");
+  std::string linear_to_gamma =
+      ExtractFunction(cases, nullptr, "xe_linear_to_pwl_gamma", "linear_to_gamma");
+  if (depth_truncating.empty() || depth_rounding.empty() || gamma_to_linear.empty() ||
+      linear_to_gamma.empty()) {
+    std::printf("helpers: not all found in the translated shaders, not checked\n");
+    return true;
+  }
+  std::string wgsl = depth_truncating + depth_rounding + gamma_to_linear + linear_to_gamma +
+                     R"(
+@group(0) @binding(0) var<storage, read> inputs: array<f32>;
+@group(0) @binding(1) var<storage, read_write> outputs: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) id: vec3u,
+        @builtin(num_workgroups) groups: vec3u) {
+  let i = id.y * groups.x * 256u + id.x;
+  if (i >= arrayLength(&inputs)) {
+    return;
+  }
+  let x = inputs[i];
+  // The depth helpers take pre-clamped depth.
+  let depth = select(0.0f, min(x, 1.0f), x >= 0.0f);
+  outputs[i * 4u] = depth_truncating(depth);
+  outputs[i * 4u + 1u] = depth_rounding(depth);
+  outputs[i * 4u + 2u] = gamma_to_linear(x);
+  outputs[i * 4u + 3u] = linear_to_gamma(vec3f(x)).x;
+}
+)";
+  // Every 61st bit pattern in [0, 1], the piece boundaries and their
+  // neighbors, and out-of-range values.
+  std::vector<float> inputs;
+  for (uint32_t bits = 0; bits <= 0x3F800000u; bits += 61) {
+    inputs.push_back(FromBits(bits));
+  }
+  for (float boundary : {64.0f / 255.0f, 96.0f / 255.0f, 192.0f / 255.0f, 64.0f / 1023.0f,
+                         128.0f / 1023.0f, 512.0f / 1023.0f, 1.0f, 0.5f, 0.0f}) {
+    inputs.push_back(boundary);
+    inputs.push_back(std::nextafter(boundary, 0.0f));
+    inputs.push_back(std::nextafter(boundary, 2.0f));
+  }
+  for (float outside : {-1.0f, -0.0f, 2.0f, 1.0e30f, std::nanf("")}) {
+    inputs.push_back(outside);
+  }
+
+  HelperResults results;
+  std::promise<void> done;
+  std::future<void> done_future = done.get_future();
+  thread.Call([&] {
+    RunHelpers(thread.device().device(), thread.device().queue(), wgsl, inputs, results, done);
+  });
+  done_future.wait();
+  if (!results.ok) {
+    std::printf("FAIL: helpers: couldn't read back the results\n");
+    return false;
+  }
+
+  size_t depth_mismatches = 0, gamma_mismatches = 0;
+  double gamma_max_error = 0.0;
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    float x = inputs[i];
+    float depth = x >= 0.0f ? std::min(x, 1.0f) : 0.0f;
+    const float* gpu = &results.outputs[i * 4];
+    for (uint32_t rounding = 0; rounding < 2; ++rounding) {
+      float expected = rex::graphics::xenos::Float20e4To32(
+                           rex::graphics::xenos::Float32To20e4(depth, rounding != 0)) *
+                       0.5f;
+      if (Bits(gpu[rounding]) != Bits(expected)) {
+        if (++depth_mismatches <= 5) {
+          std::printf("depth %s mismatch: %.9g (0x%08X): GPU %.9g, CPU %.9g\n",
+                      rounding ? "rounding" : "truncating", depth, Bits(depth), gpu[rounding],
+                      expected);
+        }
+      }
+    }
+    float expected_gamma[2] = {rex::graphics::xenos::PWLGammaToLinear(x),
+                               rex::graphics::xenos::LinearToPWLGamma(x)};
+    for (uint32_t j = 0; j < 2; ++j) {
+      double error = std::abs(double(gpu[2 + j]) - double(expected_gamma[j]));
+      if (!(error <= 1.0e-6)) {
+        if (++gamma_mismatches <= 5) {
+          std::printf("%s mismatch: %.9g: GPU %.9g, CPU %.9g\n",
+                      j ? "linear to gamma" : "gamma to linear", x, gpu[2 + j], expected_gamma[j]);
+        }
+      } else {
+        gamma_max_error = std::max(gamma_max_error, error);
+      }
+    }
+  }
+  std::printf(
+      "helpers: %zu inputs; float24 depth: %zu mismatches; PWL gamma: %zu mismatches, max "
+      "error %.3g\n",
+      inputs.size(), depth_mismatches, gamma_mismatches, gamma_max_error);
+  return !depth_mismatches && !gamma_mismatches;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -306,13 +537,19 @@ int main(int argc, char** argv) {
       m.pixel.interpolator_mask = 0xFFFF;
       m.pixel.dynamic_addressable_register_count = register_count;
       variants.emplace_back("pixel", m);
+      m.pixel.depth_stencil_mode = WgslShaderTranslator::Modification::DepthStencilMode::kEarlyHint;
+      variants.emplace_back("early_hint", m);
       m.pixel.interpolators_centroid = 0x00FF;
       m.pixel.param_gen_enable = 1;
       m.pixel.param_gen_interpolator = 0;
-      variants.emplace_back("param_gen", m);
+      m.pixel.depth_stencil_mode =
+          WgslShaderTranslator::Modification::DepthStencilMode::kFloat24Truncating;
+      variants.emplace_back("param_gen_float24", m);
       m.pixel.interpolator_mask = 0x7FFF;
       m.pixel.param_gen_point = 1;
-      variants.emplace_back("param_gen_point", m);
+      m.pixel.depth_stencil_mode =
+          WgslShaderTranslator::Modification::DepthStencilMode::kFloat24Rounding;
+      variants.emplace_back("param_gen_point_float24", m);
     }
     for (auto& [name, modification] : variants) {
       Case c;
@@ -364,6 +601,7 @@ int main(int argc, char** argv) {
     }
   });
   done.wait();
+  bool helpers_ok = CheckHelpers(*thread, cases);
   thread.reset();
 
   bool canary_rejected = true;
@@ -423,7 +661,7 @@ int main(int argc, char** argv) {
       "%zu not translated\n",
       shaders.size(), vertex, shaders.size() - vertex, cases.size(),
       cases.size() - rejected - translation_failures, rejected, translation_failures);
-  bool failed = rejected || translation_failures || !canary_rejected;
+  bool failed = rejected || translation_failures || !canary_rejected || !helpers_ok;
   std::printf("%s\n", failed ? "FAILED" : "PASSED");
   std::fflush(stdout);
   return failed ? 1 : 0;

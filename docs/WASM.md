@@ -26,14 +26,12 @@ Where things stand:
 
 ### Next steps
 
-1. Shutdown: under node the process hangs after `Execution complete` instead of exiting (natively it aborts with exit 134 at the same point, so part of it isn't wasm-specific).
-2. `GetExecutablePath` reads `/proc/self/exe`, which Emscripten lacks, so the executable folder is empty: the default `<app>.toml` config and `logs/` folder resolve nowhere and file logging silently fails. Pass `--log_file` until it reports the `.js` file's folder.
-3. Oversized functions: build them at `-O0` on wasm (per file, without the PCH), then split them in codegen for good (phase 3). Then finish Crash's build and run it, the first test of static DLL module registration.
-4. Audit a heavier title for host-side writes to watched memory (phase 4).
-5. Check CI on this branch. On `4df853d` the wasm64 build passed but the smoke test failed, most likely the `CLOCK_MONOTONIC_RAW` divide-by-zero fixed in `1035cae`.
-6. The lint job fails on 10 files that were unformatted before this branch: `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/graphics_system.cpp`, `src/graphics/pipeline/shader/dxbc_translator.cpp`, `src/graphics/pipeline/shader/dxbc_translator_memexport.cpp`, `src/graphics/pipeline/shader/spirv_translator_fetch.cpp`, `src/kernel/xam/xam_content.cpp`, `src/kernel/xam/xam_info.cpp`, `src/system/lzx.cpp`, `src/system/xam/content_manager.cpp`, `src/system/xsocket.cpp`. Running `clang-format -i` (version 20.1.8, `scripts/requirements-dev.txt`) on them fixes it.
-7. Choose JSPI or Asyncify for fibers once a title needs guest fibers.
-8. Send SDL the dummy audio memory64 fix (see [Audio](#audio)) so the overlay can go.
+1. Oversized functions: build them at `-O0` on wasm (per file, without the PCH), then split them in codegen for good (phase 3). Then finish Crash's build and run it, the first test of static DLL module registration.
+2. Audit a heavier title for host-side writes to watched memory (phase 4).
+3. Check CI on this branch. On `4df853d` the wasm64 build passed but the smoke test failed, most likely the `CLOCK_MONOTONIC_RAW` divide-by-zero fixed in `1035cae`.
+4. The lint job fails on 10 files that were unformatted before this branch: `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/graphics_system.cpp`, `src/graphics/pipeline/shader/dxbc_translator.cpp`, `src/graphics/pipeline/shader/dxbc_translator_memexport.cpp`, `src/graphics/pipeline/shader/spirv_translator_fetch.cpp`, `src/kernel/xam/xam_content.cpp`, `src/kernel/xam/xam_info.cpp`, `src/system/lzx.cpp`, `src/system/xam/content_manager.cpp`, `src/system/xsocket.cpp`. Running `clang-format -i` (version 20.1.8, `scripts/requirements-dev.txt`) on them fixes it.
+5. Choose JSPI or Asyncify for fibers once a title needs guest fibers.
+6. Send SDL the dummy audio memory64 fix (see [Audio](#audio)) so the overlay can go.
 
 ## Building
 
@@ -262,8 +260,8 @@ Codegen warns about functions over `max_file_size_bytes` (1 MB of C++). Crash's 
 - [x] Floating point: FPSCR emulated; rounding modes honored in software (see [Floating point](#floating-point)), flush-to-zero not.
 - [ ] Debug and crash tooling (`dbg_posix.cpp`, `rex crash`, core dumps) has no wasm equivalent; disable it.
 
-- [ ] Executable path: `GetExecutablePath` reads `/proc/self/exe`; report the `.js` file's folder instead.
-- [ ] Shutdown: exit once the title terminates instead of hanging.
+- [x] Executable path: `GetExecutablePath` reports the program's `.js` file, through `EM_JS`: under node its host path (NODERAWFS), so `<app>.toml` and `logs/` sit next to it as natively; in the browser `/<name>.js` in the page's file system.
+- [x] Shutdown: when the title ends by itself, the app now hard-exits as on window close (`ReXApp::ExitAfterTitle`), natively too, instead of running the subsystem teardown, which hung under node and aborted natively. Under Emscripten an exit from a pthread only reaches the main thread, which the runtime keeps alive, so the exit is proxied there and forced, with `process.exit` under node (whose event loop open handles keep alive). Tested under node with a simulated title exit: the process exits with 0 at once.
 - [x] Audio with no device: SDL's dummy driver (see [Audio](#audio)).
 - [x] Projects' hooks of kernel exports win the static link (see [No dynamic loading](#no-dynamic-loading)).
 

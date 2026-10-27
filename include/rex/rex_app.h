@@ -268,6 +268,9 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   // independently of how the presenter/drawer were obtained. `presenter` may be
   // null (detached mode).
   void SetupOverlays(ui::Presenter* presenter, ui::ImmediateDrawer* drawer);
+  // Terminates the title (if still running) and exits the process without
+  // subsystem teardown.
+  [[noreturn]] void ExitAfterTitle(int exit_code);
 
   // WindowedApp overrides
   bool OnInitialize() override;

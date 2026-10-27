@@ -22,6 +22,8 @@
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/em_js.h>
 #endif
 
 #include <rex/assert.h>
@@ -69,6 +71,28 @@ std::filesystem::path to_path(const std::u16string_view source) {
 
 namespace filesystem {
 
+#if defined(__EMSCRIPTEN__)
+// The program's .js file: under node a host path (NODERAWFS), so the config
+// and logs sit next to it as natively; in the browser, its name at the root of
+// the page's file system. Writes at most size bytes, returns the length.
+// clang-format off
+EM_JS(int, rex_get_script_path, (char* buffer, int size), {
+  var path;
+  if (typeof process === 'object' && process.versions && process.versions.node) {
+    path = process.argv[1] || 'this.program';
+    if (path[0] !== '/') {
+      path = process.cwd() + '/' + path;
+    }
+  } else {
+    var name = typeof location === 'object' ? location.pathname.split('/').pop() : '';
+    path = '/' + (name || 'this.program');
+  }
+  // Under memory64, EM_JS pointers arrive as BigInts.
+  return stringToUTF8(path, Number(buffer), size);
+});
+// clang-format on
+#endif
+
 std::filesystem::path GetExecutablePath() {
 #if defined(__APPLE__)
   // Darwin has no /proc; query the executable path via the dyld API. The first
@@ -91,6 +115,10 @@ std::filesystem::path GetExecutablePath() {
   std::error_code ec;
   std::filesystem::path canonical_path = std::filesystem::weakly_canonical(executable_path, ec);
   return ec ? std::filesystem::path(executable_path) : canonical_path;
+#elif defined(__EMSCRIPTEN__)
+  char buff[FILENAME_MAX] = "";
+  rex_get_script_path(buff, FILENAME_MAX);
+  return std::filesystem::path(buff).lexically_normal();
 #else
   char buff[FILENAME_MAX] = "";
   readlink("/proc/self/exe", buff, FILENAME_MAX);

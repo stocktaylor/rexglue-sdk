@@ -11,7 +11,16 @@
 
 #include <rex/rex_app.h>
 
+#include <chrono>
 #include <cstdlib>
+#include <thread>
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/em_js.h>
+#include <emscripten/emscripten.h>
+#include <emscripten/proxying.h>
+#include <emscripten/threading.h>
+#endif
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
@@ -492,8 +501,8 @@ void ReXApp::LaunchModule() {
       main_thread->Wait(0, 0, 0, nullptr);
       OnGuestThreadExit(main_thread.get());
       REXLOG_INFO("Execution complete");
-      if (!shutting_down_.load(std::memory_order_acquire)) {
-        app_context().CallInUIThread([this]() { app_context().QuitFromUIThread(); });
+      if (!shutting_down_.exchange(true, std::memory_order_acq_rel)) {
+        app_context().CallInUIThread([this]() { ExitAfterTitle(EXIT_SUCCESS); });
       }
     });
   });
@@ -519,16 +528,52 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
   (void)e;
   REXLOG_INFO("Window closing, shutting down...");
   shutting_down_.store(true, std::memory_order_release);
+  ExitAfterTitle(EXIT_SUCCESS);
+}
+
+#if defined(__EMSCRIPTEN__)
+namespace {
+// Under node, exits at once: Emscripten's exit only sets the exit code and
+// waits for the event loop to drain, which open handles may prevent.
+// clang-format off
+EM_JS(void, rex_exit_node_process, (int code), {
+  if (typeof process === 'object' && process.versions && process.versions.node) {
+    process.exit(code);
+  }
+});
+// clang-format on
+}  // namespace
+#endif
+
+void ReXApp::ExitAfterTitle(int exit_code) {
   if (runtime_ && runtime_->kernel_state()) {
     runtime_->kernel_state()->TerminateTitle();
   }
   // Hard-exit rather than run subsystem teardown, which can deadlock on a host
-  // lock still held by a straggler TerminateTitle left running. Flush (not
-  // ShutdownLogging, which frees loggers a straggler may still use); the OS
-  // reclaims the rest.
+  // lock still held by a straggler TerminateTitle left running (and under
+  // Emscripten, live pthreads would keep the process alive anyway). Flush
+  // (not ShutdownLogging, which frees loggers a straggler may still use); the
+  // OS reclaims the rest.
   REXLOG_INFO("Title terminated; hard-exiting process.");
   rex::FlushLogging();
-  std::_Exit(0);
+#if defined(__EMSCRIPTEN__)
+  // An exit on a pthread only reaches the main thread, which the runtime keeps
+  // alive (PROXY_TO_PTHREAD), so force it there; this thread waits for it.
+  static int forced_exit_code;
+  forced_exit_code = exit_code;
+  emscripten_proxy_async(
+      emscripten_proxy_get_system_queue(), emscripten_main_runtime_thread_id(),
+      [](void* code) {
+        rex_exit_node_process(*static_cast<int*>(code));
+        emscripten_force_exit(*static_cast<int*>(code));
+      },
+      &forced_exit_code);
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::hours(1));
+  }
+#else
+  std::_Exit(exit_code);
+#endif
 }
 
 bool ReXApp::OnCloseRequested(ui::UIEvent& e) {

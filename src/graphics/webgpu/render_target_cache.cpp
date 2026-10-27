@@ -40,11 +40,13 @@ WGPUStringView View(const char* s) {
   return {s, WGPU_STRLEN};
 }
 
-// Writes a rectangle of a color render target to the EDRAM buffer in the
-// guest's layout (XeEdramOffsetBytes in Xenia's edram.xesli, every sample of
-// each pixel as the host render target has one) and encoding (the inverse of
-// the resolve shaders' unpacking: 7e3 floats as DirectXTex, 16-bit fixed with
-// the -32...32 range).
+// Writes a rectangle of a render target to the EDRAM buffer in the guest's
+// layout (XeEdramOffsetBytes in Xenia's edram.xesli, every sample of each
+// pixel as the host render target has one, depth tiles with their halves
+// swapped) and encoding (the inverse of the resolve shaders' unpacking: 7e3
+// floats as DirectXTex, 16-bit fixed with the -32...32 range, depth in the
+// upper 24 bits as unorm or 20e4 as Float32To20e4, stencil in the lower 8).
+// main dumps color render targets, main_depth depth ones.
 const char kDumpShader[] = R"(
 struct Dump {
   base_tiles: u32,
@@ -60,6 +62,8 @@ struct Dump {
 @group(0) @binding(0) var<storage, read_write> edram: array<u32>;
 @group(0) @binding(1) var source: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> dump: Dump;
+@group(0) @binding(3) var source_depth: texture_depth_2d;
+@group(0) @binding(4) var source_stencil: texture_2d<u32>;
 
 fn float_to_7e3(value: f32) -> u32 {
   let f = clamp(value, 0.0, 31.875);
@@ -73,8 +77,52 @@ fn float_to_7e3(value: f32) -> u32 {
   return ((biased + 0x7FFFu + ((biased >> 16u) & 1u)) >> 16u) & 0x3FFu;
 }
 
+fn float_to_20e4(value: f32) -> u32 {
+  if (!(value > 0.0)) {
+    return 0u;
+  }
+  var bits = bitcast<u32>(value);
+  if (bits >= 0x3FFFFFF8u) {
+    return 0xFFFFFFu;
+  }
+  if (bits < 0x38800000u) {
+    bits = (0x800000u | (bits & 0x7FFFFFu)) >> min(113u - (bits >> 23u), 24u);
+  } else {
+    bits += 0xC8000000u;
+  }
+  bits += 3u + ((bits >> 3u) & 1u);
+  return (bits >> 3u) & 0xFFFFFFu;
+}
+
 fn fixed16(value: f32) -> u32 {
   return u32(i32(clamp(value, -32.0, 32.0) * (32767.0 / 32.0))) & 0xFFFFu;
+}
+
+fn dump_pixel(id: vec3u) -> vec2u {
+  return vec2u(dump.origin_x + id.x, dump.origin_y + id.y);
+}
+
+fn write_pixel(pixel: vec2u, packed: vec2u, is_depth: bool) {
+  let sample_shift = vec2u(select(0u, 1u, dump.msaa_samples >= 2u),
+                           select(0u, 1u, dump.msaa_samples >= 1u));
+  let tile_size = vec2u(80u >> dump.format_ints_log2, 16u);
+  for (var s = 0u; s < (1u << dump.msaa_samples); s++) {
+    var sample_index = (pixel << sample_shift) + ((vec2u(s) >> vec2u(1u, 0u)) & vec2u(1u));
+    let tile = sample_index / tile_size;
+    sample_index -= tile * tile_size;
+    if (is_depth) {
+      let half_width = tile_size.x >> 1u;
+      sample_index.x = select(sample_index.x + half_width, sample_index.x - half_width,
+                              sample_index.x >= half_width);
+    }
+    let address = ((dump.base_tiles + tile.y * dump.pitch_tiles + tile.x) * 1280u +
+                   ((sample_index.y * tile_size.x + sample_index.x) << dump.format_ints_log2)) %
+                  (1280u * 2048u);
+    edram[address] = packed.x;
+    if (dump.format_ints_log2 != 0u) {
+      edram[address + 1u] = packed.y;
+    }
+  }
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -82,7 +130,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= dump.width || id.y >= dump.height) {
     return;
   }
-  let pixel = vec2u(dump.origin_x + id.x, dump.origin_y + id.y);
+  let pixel = dump_pixel(id);
   let color = textureLoad(source, pixel, 0);
   var packed = vec2u(0u, 0u);
   switch (dump.format) {
@@ -118,21 +166,24 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     }
     default: {}
   }
-  let sample_shift = vec2u(select(0u, 1u, dump.msaa_samples >= 2u),
-                           select(0u, 1u, dump.msaa_samples >= 1u));
-  let tile_size = vec2u(80u >> dump.format_ints_log2, 16u);
-  for (var s = 0u; s < (1u << dump.msaa_samples); s++) {
-    var sample_index = (pixel << sample_shift) + ((vec2u(s) >> vec2u(1u, 0u)) & vec2u(1u));
-    let tile = sample_index / tile_size;
-    sample_index -= tile * tile_size;
-    let address = ((dump.base_tiles + tile.y * dump.pitch_tiles + tile.x) * 1280u +
-                   ((sample_index.y * tile_size.x + sample_index.x) << dump.format_ints_log2)) %
-                  (1280u * 2048u);
-    edram[address] = packed.x;
-    if (dump.format_ints_log2 != 0u) {
-      edram[address + 1u] = packed.y;
-    }
+  write_pixel(pixel, packed, false);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main_depth(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= dump.width || id.y >= dump.height) {
+    return;
   }
+  let pixel = dump_pixel(id);
+  let depth = textureLoad(source_depth, pixel, 0);
+  let stencil = textureLoad(source_stencil, pixel, 0).r & 0xFFu;
+  var depth24: u32;
+  if (dump.format == 1u) {  // kD24FS8
+    depth24 = float_to_20e4(depth);
+  } else {  // kD24S8
+    depth24 = u32(round(saturate(depth) * 16777215.0));
+  }
+  write_pixel(pixel, vec2u((depth24 << 8u) | stencil, 0u), true);
 }
 )";
 
@@ -188,39 +239,59 @@ bool WebGPURenderTargetCache::Initialize() {
       return wgpuDeviceCreateShaderModule(wgpu_device, &module_desc);
     };
 
-    // The dump reads 32-bit float render targets too, so its layout is
-    // explicit (unfilterable).
-    WGPUBindGroupLayoutEntry entries[3] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
-                                           WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
-                                           WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
-    entries[0].binding = 0;
-    entries[0].visibility = WGPUShaderStage_Compute;
-    entries[0].buffer.type = WGPUBufferBindingType_Storage;
-    entries[1].binding = 1;
-    entries[1].visibility = WGPUShaderStage_Compute;
-    entries[1].texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
-    entries[1].texture.viewDimension = WGPUTextureViewDimension_2D;
-    entries[2].binding = 2;
-    entries[2].visibility = WGPUShaderStage_Compute;
-    entries[2].buffer.type = WGPUBufferBindingType_Uniform;
-    WGPUBindGroupLayoutDescriptor layout_desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
-    layout_desc.entryCount = 3;
-    layout_desc.entries = entries;
-    dump_layout_ = wgpuDeviceCreateBindGroupLayout(wgpu_device, &layout_desc);
-    WGPUPipelineLayoutDescriptor pipeline_layout_desc = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
-    pipeline_layout_desc.bindGroupLayoutCount = 1;
-    pipeline_layout_desc.bindGroupLayouts = &dump_layout_;
-    WGPUPipelineLayout dump_pipeline_layout =
-        wgpuDeviceCreatePipelineLayout(wgpu_device, &pipeline_layout_desc);
+    // The dump layouts are explicit: color render targets may be 32-bit float
+    // (unfilterable), and depth ones are read through single-aspect views.
     WGPUShaderModule dump_module = create_module(kDumpShader, "Render target dump");
-    WGPUComputePipelineDescriptor pipeline_desc = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
-    pipeline_desc.label = View("Render target dump");
-    pipeline_desc.layout = dump_pipeline_layout;
-    pipeline_desc.compute.module = dump_module;
-    pipeline_desc.compute.entryPoint = View("main");
-    dump_pipeline_ = wgpuDeviceCreateComputePipeline(wgpu_device, &pipeline_desc);
+    auto create_dump_pipeline = [&](const WGPUBindGroupLayoutEntry* texture_entries,
+                                    size_t texture_entry_count, const char* entry_point,
+                                    WGPUBindGroupLayout& layout_out) {
+      WGPUBindGroupLayoutEntry entries[4] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
+                                             WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
+      entries[0].binding = 0;
+      entries[0].visibility = WGPUShaderStage_Compute;
+      entries[0].buffer.type = WGPUBufferBindingType_Storage;
+      entries[1].binding = 2;
+      entries[1].visibility = WGPUShaderStage_Compute;
+      entries[1].buffer.type = WGPUBufferBindingType_Uniform;
+      for (size_t i = 0; i < texture_entry_count; ++i) {
+        entries[2 + i] = texture_entries[i];
+      }
+      WGPUBindGroupLayoutDescriptor layout_desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+      layout_desc.entryCount = 2 + texture_entry_count;
+      layout_desc.entries = entries;
+      layout_out = wgpuDeviceCreateBindGroupLayout(wgpu_device, &layout_desc);
+      WGPUPipelineLayoutDescriptor pipeline_layout_desc = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
+      pipeline_layout_desc.bindGroupLayoutCount = 1;
+      pipeline_layout_desc.bindGroupLayouts = &layout_out;
+      WGPUPipelineLayout pipeline_layout =
+          wgpuDeviceCreatePipelineLayout(wgpu_device, &pipeline_layout_desc);
+      WGPUComputePipelineDescriptor pipeline_desc = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
+      pipeline_desc.label = View("Render target dump");
+      pipeline_desc.layout = pipeline_layout;
+      pipeline_desc.compute.module = dump_module;
+      pipeline_desc.compute.entryPoint = View(entry_point);
+      WGPUComputePipeline pipeline = wgpuDeviceCreateComputePipeline(wgpu_device, &pipeline_desc);
+      wgpuPipelineLayoutRelease(pipeline_layout);
+      return pipeline;
+    };
+    WGPUBindGroupLayoutEntry color_entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
+    color_entry.binding = 1;
+    color_entry.visibility = WGPUShaderStage_Compute;
+    color_entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+    color_entry.texture.viewDimension = WGPUTextureViewDimension_2D;
+    dump_pipeline_ = create_dump_pipeline(&color_entry, 1, "main", dump_layout_);
+    WGPUBindGroupLayoutEntry depth_entries[2] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
+                                                 WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
+    depth_entries[0].binding = 3;
+    depth_entries[0].visibility = WGPUShaderStage_Compute;
+    depth_entries[0].texture.sampleType = WGPUTextureSampleType_Depth;
+    depth_entries[0].texture.viewDimension = WGPUTextureViewDimension_2D;
+    depth_entries[1].binding = 4;
+    depth_entries[1].visibility = WGPUShaderStage_Compute;
+    depth_entries[1].texture.sampleType = WGPUTextureSampleType_Uint;
+    depth_entries[1].texture.viewDimension = WGPUTextureViewDimension_2D;
+    depth_dump_pipeline_ = create_dump_pipeline(depth_entries, 2, "main_depth", depth_dump_layout_);
     wgpuShaderModuleRelease(dump_module);
-    wgpuPipelineLayoutRelease(dump_pipeline_layout);
 
     for (size_t i = 0; i < copy_pipelines_.size(); ++i) {
       const char* name = draw_util::resolve_copy_shader_info[i].debug_name;
@@ -233,7 +304,8 @@ bool WebGPURenderTargetCache::Initialize() {
       wgpuShaderModuleRelease(module);
       ok &= copy_pipelines_[i] != nullptr;
     }
-    ok &= edram_buffer_ && dump_layout_ && dump_pipeline_;
+    ok &= edram_buffer_ && dump_layout_ && dump_pipeline_ && depth_dump_layout_ &&
+          depth_dump_pipeline_;
   });
   if (!ok) {
     REXGPU_ERROR("WebGPU: couldn't create the resolve objects");
@@ -305,6 +377,13 @@ WebGPURenderTargetCache::RenderTarget* WebGPURenderTargetCache::GetOrCreate(
         wgpuDeviceCreateTexture(command_processor_.device_thread().device().device(), &desc);
     if (render_target->texture) {
       render_target->view = wgpuTextureCreateView(render_target->texture, nullptr);
+      if (is_depth) {
+        WGPUTextureViewDescriptor view_desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+        view_desc.aspect = WGPUTextureAspect_DepthOnly;
+        render_target->depth_view = wgpuTextureCreateView(render_target->texture, &view_desc);
+        view_desc.aspect = WGPUTextureAspect_StencilOnly;
+        render_target->stencil_view = wgpuTextureCreateView(render_target->texture, &view_desc);
+      }
     }
   });
   if (!render_target->view) {
@@ -326,11 +405,8 @@ void WebGPURenderTargetCache::ResolveCopy(const draw_util::ResolveInfo& resolve_
   if (!resolve_info.copy_dest_extent_length) {
     return;
   }
-  if (resolve_info.IsCopyingDepth()) {
-    if (!depth_resolve_logged_) {
-      depth_resolve_logged_ = true;
-      REXGPU_WARN("WebGPU: depth resolves aren't supported yet");
-    }
+  bool is_depth = resolve_info.IsCopyingDepth();
+  if (is_depth != source.is_depth || (is_depth && !source.stencil_view)) {
     return;
   }
   draw_util::ResolveCopyShaderConstants copy_constants;
@@ -343,18 +419,20 @@ void WebGPURenderTargetCache::ResolveCopy(const draw_util::ResolveInfo& resolve_
   }
 
   // The whole tiles the copy reads, as a rectangle of the render target.
-  const draw_util::ResolveEdramInfo& edram_info = resolve_info.color_edram_info;
+  const draw_util::ResolveEdramInfo& edram_info =
+      is_depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+  uint32_t original_base =
+      is_depth ? resolve_info.depth_original_base : resolve_info.color_original_base;
   uint32_t span_base, span_row_length, span_rows, span_pitch;
   resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows, span_pitch);
   span_pitch = std::max(span_pitch, uint32_t(1));
   uint32_t relative_tiles =
-      (span_base + xenos::kEdramTileCount - resolve_info.color_original_base) %
-      xenos::kEdramTileCount;
+      (span_base + xenos::kEdramTileCount - original_base) % xenos::kEdramTileCount;
   uint32_t tile_width = xenos::kEdramTileWidthSamples >> uint32_t(edram_info.format_is_64bpp);
   uint32_t sample_shift_x = uint32_t(edram_info.msaa_samples >= xenos::MsaaSamples::k4X);
   uint32_t sample_shift_y = uint32_t(edram_info.msaa_samples >= xenos::MsaaSamples::k2X);
   DumpConstants dump;
-  dump.base_tiles = resolve_info.color_original_base;
+  dump.base_tiles = original_base;
   dump.pitch_tiles = span_pitch;
   dump.msaa_samples = uint32_t(edram_info.msaa_samples);
   dump.format = edram_info.format;
@@ -385,10 +463,11 @@ void WebGPURenderTargetCache::ResolveCopy(const draw_util::ResolveInfo& resolve_
 
   command_processor_.EndRenderPass();
   WGPUBuffer edram_buffer = edram_buffer_;
-  WGPUBindGroupLayout dump_layout = dump_layout_;
-  WGPUComputePipeline dump_pipeline = dump_pipeline_;
+  WGPUBindGroupLayout dump_layout = is_depth ? depth_dump_layout_ : dump_layout_;
+  WGPUComputePipeline dump_pipeline = is_depth ? depth_dump_pipeline_ : dump_pipeline_;
   WGPUComputePipeline copy_pipeline = copy_pipelines_[size_t(copy_shader)];
-  WGPUTextureView source_view = source.view;
+  WGPUTextureView source_view = is_depth ? source.depth_view : source.view;
+  WGPUTextureView stencil_view = source.stencil_view;
   WGPUBuffer shared_memory_buffer = shared_memory.buffer();
   command_processor_.command_list().Record([=](WebGPUCommandList::Encoder& encoder) {
     WGPUDevice device = encoder.device;
@@ -405,19 +484,21 @@ void WebGPURenderTargetCache::ResolveCopy(const draw_util::ResolveInfo& resolve_
     }
     wgpuBufferUnmap(constants);
 
-    WGPUBindGroupEntry dump_entries[3] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT,
-                                          WGPU_BIND_GROUP_ENTRY_INIT};
+    WGPUBindGroupEntry dump_entries[4] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT,
+                                          WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
     dump_entries[0].binding = 0;
     dump_entries[0].buffer = edram_buffer;
     dump_entries[0].size = xenos::kEdramSizeBytes;
-    dump_entries[1].binding = 1;
-    dump_entries[1].textureView = source_view;
-    dump_entries[2].binding = 2;
-    dump_entries[2].buffer = constants;
-    dump_entries[2].size = rex::round_up(sizeof(DumpConstants), size_t(16));
+    dump_entries[1].binding = 2;
+    dump_entries[1].buffer = constants;
+    dump_entries[1].size = rex::round_up(sizeof(DumpConstants), size_t(16));
+    dump_entries[2].binding = is_depth ? 3 : 1;
+    dump_entries[2].textureView = source_view;
+    dump_entries[3].binding = 4;
+    dump_entries[3].textureView = stencil_view;
     WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
     group_desc.layout = dump_layout;
-    group_desc.entryCount = 3;
+    group_desc.entryCount = is_depth ? 4 : 3;
     group_desc.entries = dump_entries;
     WGPUBindGroup dump_group = wgpuDeviceCreateBindGroup(device, &group_desc);
 
@@ -470,17 +551,24 @@ void WebGPURenderTargetCache::Shutdown() {
   auto render_targets = std::make_shared<decltype(render_targets_)>(std::move(render_targets_));
   render_targets_.clear();
   WGPUBuffer edram_buffer = edram_buffer_;
-  WGPUBindGroupLayout dump_layout = dump_layout_;
-  WGPUComputePipeline dump_pipeline = dump_pipeline_;
+  WGPUBindGroupLayout dump_layouts[2] = {dump_layout_, depth_dump_layout_};
+  WGPUComputePipeline dump_pipelines[2] = {dump_pipeline_, depth_dump_pipeline_};
   auto copy_pipelines = copy_pipelines_;
   edram_buffer_ = nullptr;
   dump_layout_ = nullptr;
   dump_pipeline_ = nullptr;
+  depth_dump_layout_ = nullptr;
+  depth_dump_pipeline_ = nullptr;
   copy_pipelines_.fill(nullptr);
   command_processor_.device_thread().Post(
-      [render_targets, edram_buffer, dump_layout, dump_pipeline, copy_pipelines] {
+      [render_targets, edram_buffer, dump_layouts, dump_pipelines, copy_pipelines] {
         for (auto& [key, render_target] : *render_targets) {
-          wgpuTextureViewRelease(render_target->view);
+          for (WGPUTextureView view :
+               {render_target->view, render_target->depth_view, render_target->stencil_view}) {
+            if (view) {
+              wgpuTextureViewRelease(view);
+            }
+          }
           wgpuTextureRelease(render_target->texture);
         }
         for (WGPUComputePipeline pipeline : copy_pipelines) {
@@ -488,11 +576,15 @@ void WebGPURenderTargetCache::Shutdown() {
             wgpuComputePipelineRelease(pipeline);
           }
         }
-        if (dump_pipeline) {
-          wgpuComputePipelineRelease(dump_pipeline);
+        for (WGPUComputePipeline pipeline : dump_pipelines) {
+          if (pipeline) {
+            wgpuComputePipelineRelease(pipeline);
+          }
         }
-        if (dump_layout) {
-          wgpuBindGroupLayoutRelease(dump_layout);
+        for (WGPUBindGroupLayout layout : dump_layouts) {
+          if (layout) {
+            wgpuBindGroupLayoutRelease(layout);
+          }
         }
         if (edram_buffer) {
           wgpuBufferRelease(edram_buffer);

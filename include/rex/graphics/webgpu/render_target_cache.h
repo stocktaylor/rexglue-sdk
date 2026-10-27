@@ -43,6 +43,9 @@ class WebGPURenderTargetCache {
   struct RenderTarget {
     WGPUTexture texture = nullptr;
     WGPUTextureView view = nullptr;
+    // Depth render targets only: single-aspect views for resolves.
+    WGPUTextureView depth_view = nullptr;
+    WGPUTextureView stencil_view = nullptr;
     WGPUTextureFormat format = WGPUTextureFormat_Undefined;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -65,8 +68,9 @@ class WebGPURenderTargetCache {
   RenderTarget* GetDepth(uint32_t base_tiles, uint32_t pitch,
                          xenos::DepthRenderTargetFormat format);
 
-  // Records copying the resolve area of `source` (the color render target the
-  // resolve reads) to its destination in shared memory. Clears are separate.
+  // Records copying the resolve area of `source` (the color or depth render
+  // target the resolve reads) to its destination in shared memory. Clears are
+  // separate.
   void ResolveCopy(const draw_util::ResolveInfo& resolve_info, RenderTarget& source,
                    WebGPUSharedMemory& shared_memory, WebGPUTextureCache& texture_cache);
 
@@ -82,10 +86,11 @@ class WebGPURenderTargetCache {
   WGPUBuffer edram_buffer_ = nullptr;
   WGPUBindGroupLayout dump_layout_ = nullptr;
   WGPUComputePipeline dump_pipeline_ = nullptr;
+  WGPUBindGroupLayout depth_dump_layout_ = nullptr;
+  WGPUComputePipeline depth_dump_pipeline_ = nullptr;
   std::array<WGPUComputePipeline, size_t(draw_util::ResolveCopyShaderIndex::kCount)>
       copy_pipelines_{};
   uint32_t min_storage_offset_alignment_ = 256;
-  bool depth_resolve_logged_ = false;
 };
 
 }  // namespace rex::graphics::webgpu

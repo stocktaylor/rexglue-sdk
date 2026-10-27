@@ -97,7 +97,12 @@ void WebGPUCommandProcessor::ShutdownContext() {
   if (device_thread_) {
     WGPUBindGroup bind_group = shared_memory_bind_group_;
     WGPUTexture resolved = resolved_texture_;
-    device_thread_->Post([bind_group, resolved] {
+    WGPURenderPipeline swap_pipeline = swap_pipeline_;
+    swap_pipeline_ = nullptr;
+    device_thread_->Post([bind_group, resolved, swap_pipeline] {
+      if (swap_pipeline) {
+        wgpuRenderPipelineRelease(swap_pipeline);
+      }
       if (bind_group) {
         wgpuBindGroupRelease(bind_group);
       }
@@ -953,46 +958,140 @@ void WebGPUCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   if (!presenter) {
     return;
   }
-  WGPUTexture resolved = resolved_format_ == ui::webgpu::WebGPUPresenter::kGuestOutputFormat
-                             ? resolved_texture_
-                             : nullptr;
+  // The display gamma ramp of the guest: the 256-entry table for 8-bit
+  // frontbuffers, the piecewise linear one for 10-bit ones.
+  auto ramps = std::make_shared<SwapRamps>();
+  static_assert(sizeof(ramps->table) == sizeof(reg::DC_LUT_30_COLOR) * 256);
+  static_assert(sizeof(ramps->pwl) == sizeof(reg::DC_LUT_PWL_DATA) * 128 * 3);
+  std::memcpy(ramps->table, gamma_ramp_256_entry_table(), sizeof(ramps->table));
+  std::memcpy(ramps->pwl, gamma_ramp_pwl_rgb(), sizeof(ramps->pwl));
+  ramps->use_pwl[0] = resolved_format_ == WGPUTextureFormat_RGB10A2Unorm;
+  WGPUTexture resolved = resolved_texture_;
   uint32_t copy_width = std::min(resolved_width_, frontbuffer_width);
   uint32_t copy_height = std::min(resolved_height_, frontbuffer_height);
   presenter->RefreshGuestOutput(
       frontbuffer_width, frontbuffer_height, 1280, 720,
-      [this, resolved, copy_width,
-       copy_height](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+      [this, resolved, copy_width, copy_height,
+       ramps](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& webgpu_context =
             static_cast<ui::webgpu::WebGPUPresenter::WebGPUGuestOutputRefreshContext&>(context);
-        const ui::webgpu::WebGPUDevice& device = device_thread_->device();
-        WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device.device(), nullptr);
-        if (resolved && copy_width && copy_height) {
-          WGPUTexelCopyTextureInfo source = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
-          source.texture = resolved;
-          WGPUTexelCopyTextureInfo destination = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
-          destination.texture = webgpu_context.texture();
-          WGPUExtent3D size = {copy_width, copy_height, 1};
-          wgpuCommandEncoderCopyTextureToTexture(encoder, &source, &destination, &size);
-        } else {
-          // Nothing resolved in a format the guest output takes.
-          WGPURenderPassColorAttachment attachment = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
-          attachment.view = webgpu_context.view();
-          attachment.loadOp = WGPULoadOp_Clear;
-          attachment.storeOp = WGPUStoreOp_Store;
-          attachment.clearValue = {0.05, 0.1, 0.3, 1.0};
-          WGPURenderPassDescriptor pass_desc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
-          pass_desc.colorAttachmentCount = 1;
-          pass_desc.colorAttachments = &attachment;
-          WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
-          wgpuRenderPassEncoderEnd(pass);
-          wgpuRenderPassEncoderRelease(pass);
+        context.SetIs8bpc(!ramps->use_pwl[0]);
+        WGPUDevice device = device_thread_->device().device();
+        WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
+        WGPURenderPassColorAttachment attachment = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
+        attachment.view = webgpu_context.view();
+        attachment.loadOp = WGPULoadOp_Clear;
+        attachment.storeOp = WGPUStoreOp_Store;
+        attachment.clearValue = {0.0, 0.0, 0.0, 1.0};
+        WGPURenderPassDescriptor pass_desc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+        pass_desc.colorAttachmentCount = 1;
+        pass_desc.colorAttachments = &attachment;
+        WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
+        if (resolved && copy_width && copy_height && EnsureSwapPipeline()) {
+          // The resolved area through the gamma ramp into the guest output.
+          WGPUBufferDescriptor buffer_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
+          buffer_desc.size = sizeof(SwapRamps);
+          buffer_desc.usage = WGPUBufferUsage_Uniform;
+          buffer_desc.mappedAtCreation = true;
+          WGPUBuffer ramp_buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
+          std::memcpy(wgpuBufferGetMappedRange(ramp_buffer, 0, sizeof(SwapRamps)), ramps.get(),
+                      sizeof(SwapRamps));
+          wgpuBufferUnmap(ramp_buffer);
+          WGPUTextureView source_view = wgpuTextureCreateView(resolved, nullptr);
+          WGPUBindGroupEntry entries[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
+          entries[0].binding = 0;
+          entries[0].buffer = ramp_buffer;
+          entries[0].size = sizeof(SwapRamps);
+          entries[1].binding = 1;
+          entries[1].textureView = source_view;
+          WGPUBindGroupLayout layout = wgpuRenderPipelineGetBindGroupLayout(swap_pipeline_, 0);
+          WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+          group_desc.layout = layout;
+          group_desc.entryCount = 2;
+          group_desc.entries = entries;
+          WGPUBindGroup bind_group = wgpuDeviceCreateBindGroup(device, &group_desc);
+          wgpuRenderPassEncoderSetPipeline(pass, swap_pipeline_);
+          wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, nullptr);
+          wgpuRenderPassEncoderSetScissorRect(pass, 0, 0, copy_width, copy_height);
+          wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+          wgpuBindGroupRelease(bind_group);
+          wgpuBindGroupLayoutRelease(layout);
+          wgpuTextureViewRelease(source_view);
+          wgpuBufferRelease(ramp_buffer);
         }
+        wgpuRenderPassEncoderEnd(pass);
+        wgpuRenderPassEncoderRelease(pass);
         WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
-        wgpuQueueSubmit(device.queue(), 1, &commands);
+        wgpuQueueSubmit(device_thread_->device().queue(), 1, &commands);
         wgpuCommandBufferRelease(commands);
         wgpuCommandEncoderRelease(encoder);
         return true;
       });
+}
+
+bool WebGPUCommandProcessor::EnsureSwapPipeline() {
+  if (swap_pipeline_) {
+    return true;
+  }
+  // As the Vulkan backend's apply_gamma shaders (table and PWL), with a full
+  // screen triangle.
+  static const char kSwapShader[] = R"(
+struct Ramps {
+  table: array<vec4u, 64>,
+  pwl: array<vec4u, 96>,
+  use_pwl: vec4u,
+}
+@group(0) @binding(0) var<uniform> ramps: Ramps;
+@group(0) @binding(1) var source: texture_2d<f32>;
+
+fn table_entry(i: u32) -> u32 { return ramps.table[i >> 2u][i & 3u]; }
+
+fn apply_pwl(value_10b: u32, channel: u32) -> f32 {
+  let index = (value_10b >> 3u) * 3u + channel;
+  let entry = ramps.pwl[index >> 2u][index & 3u];
+  let value = f32(entry & 0xFFFFu) + f32((value_10b & 7u) * (entry >> 16u)) * 0.125;
+  return clamp(value * 1.52737048e-05, 0.0, 1.0);
+}
+
+@vertex fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+  let xy = vec2f(f32((index << 1u) & 2u), f32(index & 2u));
+  return vec4f(xy * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), 0.0, 1.0);
+}
+
+@fragment fn fs_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
+  let color = textureLoad(source, vec2i(position.xy), 0);
+  if (ramps.use_pwl.x != 0u) {
+    let value = vec3u(color.rgb * 1023.0 + 0.5);
+    return vec4f(apply_pwl(value.r, 0u), apply_pwl(value.g, 1u), apply_pwl(value.b, 2u), 1.0);
+  }
+  let value = vec3u(color.rgb * 255.0 + 0.5);
+  // 10-bit blue, green, red in bits 0, 10, 20.
+  return vec4f(f32((table_entry(value.r) >> 20u) & 0x3FFu),
+               f32((table_entry(value.g) >> 10u) & 0x3FFu),
+               f32(table_entry(value.b) & 0x3FFu), 1023.0) / 1023.0;
+}
+)";
+  WGPUDevice device = device_thread_->device().device();
+  WGPUShaderSourceWGSL source = WGPU_SHADER_SOURCE_WGSL_INIT;
+  source.code = {kSwapShader, WGPU_STRLEN};
+  WGPUShaderModuleDescriptor module_desc = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
+  module_desc.nextInChain = &source.chain;
+  WGPUShaderModule module = wgpuDeviceCreateShaderModule(device, &module_desc);
+  WGPUColorTargetState target = WGPU_COLOR_TARGET_STATE_INIT;
+  target.format = ui::webgpu::WebGPUPresenter::kGuestOutputFormat;
+  WGPUFragmentState fragment = WGPU_FRAGMENT_STATE_INIT;
+  fragment.module = module;
+  fragment.entryPoint = {"fs_main", WGPU_STRLEN};
+  fragment.targetCount = 1;
+  fragment.targets = &target;
+  WGPURenderPipelineDescriptor desc = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
+  desc.label = {"Swap gamma ramp", WGPU_STRLEN};
+  desc.vertex.module = module;
+  desc.vertex.entryPoint = {"vs_main", WGPU_STRLEN};
+  desc.fragment = &fragment;
+  swap_pipeline_ = wgpuDeviceCreateRenderPipeline(device, &desc);
+  wgpuShaderModuleRelease(module);
+  return swap_pipeline_ != nullptr;
 }
 
 }  // namespace rex::graphics::webgpu

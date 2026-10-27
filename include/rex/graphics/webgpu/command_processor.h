@@ -117,6 +117,15 @@ class WebGPUCommandProcessor : public CommandProcessor {
   bool last_constants_valid_[WgslShaderTranslator::kConstantBufferCount] = {};
   std::vector<uint8_t> float_constants_;
 
+  // Device thread only: the swap's gamma ramp pipeline, created on first use.
+  bool EnsureSwapPipeline();
+  struct SwapRamps {
+    uint32_t table[256];
+    uint32_t pwl[128 * 3];
+    uint32_t use_pwl[4];
+  };
+  WGPURenderPipeline swap_pipeline_ = nullptr;
+
   // The last resolved color area, copied out at resolve time (resolves often
   // clear the source right after), shown by the swap until resolves write
   // memory and the swap reads the frontbuffer.

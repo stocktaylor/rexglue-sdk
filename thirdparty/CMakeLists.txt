@@ -311,30 +311,62 @@ endif()
 
 add_subdirectory(sdl3)
 
+# Emscripten fixes to SDL sources, built from patched copies so the submodule
+# stays untouched. Each copy keeps the original's relative includes resolving
+# through the original's directory. _rex_sdl_overlay replaces the source at
+# `relative_path` with the code in the variable named `code_variable`.
+function(_rex_sdl_overlay relative_path code_variable)
+    set(_original "${CMAKE_CURRENT_SOURCE_DIR}/sdl3/${relative_path}")
+    set(_fixed "${CMAKE_CURRENT_BINARY_DIR}/sdl3-overlay/${relative_path}")
+    file(WRITE "${_fixed}.tmp" "${${code_variable}}")
+    file(COPY_FILE "${_fixed}.tmp" "${_fixed}" ONLY_IF_DIFFERENT)
+    string(REPLACE "." "\\." _path_regex "${relative_path}")
+    get_target_property(_sdl_sources SDL3-static SOURCES)
+    list(TRANSFORM _sdl_sources REPLACE "^.*/${_path_regex}$" "${_fixed}")
+    set_target_properties(SDL3-static PROPERTIES SOURCES "${_sdl_sources}")
+    get_filename_component(_original_dir "${_original}" DIRECTORY)
+    set_source_files_properties("${_fixed}" TARGET_DIRECTORY SDL3-static PROPERTIES
+        INCLUDE_DIRECTORIES "${_original_dir}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_original}")
+endfunction()
+
 # SDL's dummy audio driver drives its Emscripten timer with dynCall('vi', ...),
 # passing the device pointer as an i32, which throws under memory64 ("Cannot
-# convert ... to a BigInt"). Build a copy with the pointer signature ('vp')
-# instead, leaving the submodule untouched. The copy keeps the original's
-# relative includes resolving through the original's directory.
+# convert ... to a BigInt"). Use the pointer signature ('vp') instead.
 if(EMSCRIPTEN AND SDL_DUMMYAUDIO)
-    set(_sdl_dummy_src "${CMAKE_CURRENT_SOURCE_DIR}/sdl3/src/audio/dummy/SDL_dummyaudio.c")
-    set(_sdl_dummy_fixed "${CMAKE_CURRENT_BINARY_DIR}/sdl3-overlay/src/audio/dummy/SDL_dummyaudio.c")
-    file(READ "${_sdl_dummy_src}" _sdl_dummy_code)
-    string(FIND "${_sdl_dummy_code}" "dynCall('vi', $3, [$4])" _sdl_dummy_pos)
-    if(_sdl_dummy_pos EQUAL -1)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/sdl3/src/audio/dummy/SDL_dummyaudio.c" _sdl_code)
+    string(FIND "${_sdl_code}" "dynCall('vi', $3, [$4])" _sdl_pos)
+    if(_sdl_pos EQUAL -1)
         message(WARNING "SDL_dummyaudio.c no longer calls dynCall('vi', $3, [$4]); "
                         "drop the memory64 overlay in thirdparty/CMakeLists.txt if SDL fixed it")
     else()
-        string(REPLACE "dynCall('vi', $3, [$4])" "dynCall('vp', $3, [$4])"
-               _sdl_dummy_code "${_sdl_dummy_code}")
-        file(WRITE "${_sdl_dummy_fixed}.tmp" "${_sdl_dummy_code}")
-        file(COPY_FILE "${_sdl_dummy_fixed}.tmp" "${_sdl_dummy_fixed}" ONLY_IF_DIFFERENT)
-        get_target_property(_sdl_sources SDL3-static SOURCES)
-        list(TRANSFORM _sdl_sources REPLACE "^.*/src/audio/dummy/SDL_dummyaudio\\.c$" "${_sdl_dummy_fixed}")
-        set_target_properties(SDL3-static PROPERTIES SOURCES "${_sdl_sources}")
-        set_source_files_properties("${_sdl_dummy_fixed}" TARGET_DIRECTORY SDL3-static PROPERTIES
-            INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/sdl3/src/audio/dummy")
-        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_sdl_dummy_src}")
+        string(REPLACE "dynCall('vi', $3, [$4])" "dynCall('vp', $3, [$4])" _sdl_code "${_sdl_code}")
+        _rex_sdl_overlay(src/audio/dummy/SDL_dummyaudio.c _sdl_code)
+    endif()
+endif()
+
+# SDL's Emscripten joystick driver registers its gamepad connection callbacks
+# on the calling thread, but the UI thread that initializes it is a worker,
+# where the callbacks' navigator.getGamepads() doesn't exist. Run them on the
+# main browser thread instead, and let the driver's initial scan of connected
+# gamepads (still on the worker) do without the vendor and product IDs.
+if(EMSCRIPTEN)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/sdl3/src/joystick/emscripten/SDL_sysjoystick.c" _sdl_code)
+    set(_sdl_get_gamepad "let gamepad = navigator['getGamepads']()[device_index];")
+    string(FIND "${_sdl_code}" "${_sdl_get_gamepad}" _sdl_get_pos)
+    string(FIND "${_sdl_code}" "emscripten_set_gamepadconnected_callback(NULL," _sdl_set_pos)
+    if(_sdl_get_pos EQUAL -1 OR _sdl_set_pos EQUAL -1)
+        message(WARNING "SDL's Emscripten joystick driver changed; "
+                        "revisit its overlay in thirdparty/CMakeLists.txt")
+    else()
+        string(REPLACE "${_sdl_get_gamepad}"
+            "let gamepad = navigator['getGamepads'] && navigator['getGamepads']()[device_index]; if (!gamepad) return 0;"
+            _sdl_code "${_sdl_code}")
+        string(REGEX REPLACE
+            "emscripten_set_gamepad(dis)?connected_callback\\(NULL,([^;]*)\\);"
+            "emscripten_set_gamepad\\1connected_callback_on_thread(NULL,\\2, EM_CALLBACK_THREAD_CONTEXT_MAIN_RUNTIME_THREAD);"
+            _sdl_code "${_sdl_code}")
+        _rex_sdl_overlay(src/joystick/emscripten/SDL_sysjoystick.c _sdl_code)
     endif()
 endif()
 

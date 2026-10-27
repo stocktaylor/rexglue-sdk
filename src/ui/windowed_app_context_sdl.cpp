@@ -17,6 +17,10 @@
 
 #include <SDL3/SDL.h>
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/threading.h>
+#endif
+
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
@@ -87,10 +91,21 @@ void SDLWindowedAppContext::PlatformQuitFromUIThread() {
 int SDLWindowedAppContext::RunMainMessageLoop() {
   while (!HasQuitFromUIThread()) {
     SDL_Event event;
+#if defined(__EMSCRIPTEN__)
+    // The browser events SDL listens to (keyboard, mouse, focus, resize) are
+    // proxied to this thread, which runs them only when it processes its
+    // queue, as it never returns to its event loop. Proxied work doesn't wake
+    // SDL_WaitEvent, so wait in short steps.
+    emscripten_current_thread_process_queued_calls();
+    if (!SDL_WaitEventTimeout(&event, 4)) {
+      continue;
+    }
+#else
     if (!SDL_WaitEvent(&event)) {
       REXLOG_ERROR("SDL_WaitEvent failed: {}", SDL_GetError());
       return EXIT_FAILURE;
     }
+#endif
     ProcessEvent(event);
   }
   return EXIT_SUCCESS;

@@ -12,6 +12,7 @@
 #pragma once
 
 #include <array>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -166,6 +167,16 @@ class WebGPUPresenter : public Presenter {
 
   std::mutex capture_mutex_;
   std::function<void(RawImage&& image)> capture_next_paint_;
+
+#if defined(__EMSCRIPTEN__)
+  // The browser presents without blocking, unlike a FIFO swap chain, so paints
+  // wait for the animation frame after the last present instead.
+  std::mutex animation_frame_mutex_;
+  std::condition_variable animation_frame_reached_;
+  bool animation_frame_pending_ = false;
+  // Device thread: the requested animation frame callback, 0 if none.
+  long animation_frame_id_ = 0;
+#endif
 };
 
 }  // namespace rex::ui::webgpu

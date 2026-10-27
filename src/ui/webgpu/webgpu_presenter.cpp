@@ -12,6 +12,7 @@
 #include <rex/ui/webgpu/presenter.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <future>
 
@@ -26,6 +27,8 @@
 #include <rex/ui/surface_mac.h>
 #endif
 #if defined(__EMSCRIPTEN__)
+#include <emscripten/html5.h>
+
 #include <rex/ui/surface_sdl.h>
 #endif
 
@@ -128,6 +131,12 @@ WebGPUPresenter::~WebGPUPresenter() {
 }
 
 void WebGPUPresenter::Shutdown() {
+#if defined(__EMSCRIPTEN__)
+  if (animation_frame_id_) {
+    emscripten_cancel_animation_frame(animation_frame_id_);
+    animation_frame_id_ = 0;
+  }
+#endif
   Disconnect();
   for (GuestOutputImage& image : guest_output_images_) {
     ReleaseGuestOutputImage(image);
@@ -413,6 +422,15 @@ WGPURenderPipeline WebGPUPresenter::GetGuestOutputPipeline(WGPUTextureFormat for
 Presenter::PaintResult WebGPUPresenter::PaintAndPresentImpl(bool execute_ui_drawers) {
   // The UI drawers run on the device thread too, while the UI thread waits.
   PaintResult result;
+#if defined(__EMSCRIPTEN__)
+  // Otherwise UI repaints would run back to back, flooding the device thread.
+  // Not forever though, as animation frames stop in a hidden tab.
+  if (!device_thread_.IsCurrentThread()) {
+    std::unique_lock<std::mutex> lock(animation_frame_mutex_);
+    animation_frame_reached_.wait_for(lock, std::chrono::milliseconds(100),
+                                      [this] { return !animation_frame_pending_; });
+  }
+#endif
   device_thread_.Call([&] { result = Paint(execute_ui_drawers); });
   return result;
 }
@@ -532,6 +550,24 @@ Presenter::PaintResult WebGPUPresenter::Paint(bool execute_ui_drawers) {
   // The canvas presents by itself when the device thread returns to its event
   // loop, after this task; emdawnwebgpu aborts on wgpuSurfacePresent.
   WGPUStatus present_status = WGPUStatus_Success;
+  if (!animation_frame_id_) {
+    {
+      std::lock_guard<std::mutex> lock(animation_frame_mutex_);
+      animation_frame_pending_ = true;
+    }
+    animation_frame_id_ = emscripten_request_animation_frame(
+        [](double, void* user_data) -> bool {
+          auto* presenter = static_cast<WebGPUPresenter*>(user_data);
+          presenter->animation_frame_id_ = 0;
+          {
+            std::lock_guard<std::mutex> lock(presenter->animation_frame_mutex_);
+            presenter->animation_frame_pending_ = false;
+          }
+          presenter->animation_frame_reached_.notify_all();
+          return false;
+        },
+        this);
+  }
 #else
   WGPUStatus present_status = wgpuSurfacePresent(surface_);
 #endif

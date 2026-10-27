@@ -18,6 +18,10 @@
 
 #include <fmt/format.h>
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/em_asm.h>
+#endif
+
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/perf/counter.h>
@@ -975,6 +979,18 @@ void CommandProcessor::CaptureGuestOutputToFile(const std::string& path) {
   }
   std::fclose(file);
   REXGPU_INFO("Saved frame {} to {}", capture_swap_count_, path);
+#if defined(__EMSCRIPTEN__)
+  // The file is in the page's memory; under emrun (rex wasm browser), its
+  // server also saves it, in its working directory.
+  // clang-format off
+  MAIN_THREAD_EM_ASM({
+    if (typeof emrun_file_dump === 'function') {
+      var path = UTF8ToString($0);
+      emrun_file_dump(path.split('/').pop(), FS.readFile(path));
+    }
+  }, path.c_str());
+  // clang-format on
+#endif
 }
 
 bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, uint32_t packet,

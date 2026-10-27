@@ -26,7 +26,8 @@ add_library(rex::webgpu ALIAS rex_webgpu)
 
 if(EMSCRIPTEN)
     target_compile_options(rex_webgpu INTERFACE --use-port=emdawnwebgpu)
-    target_link_options(rex_webgpu INTERFACE --use-port=emdawnwebgpu)
+    target_link_options(rex_webgpu INTERFACE --use-port=emdawnwebgpu
+        "--pre-js=${CMAKE_CURRENT_LIST_DIR}/emdawnwebgpu_heap_views.js")
     return()
 endif()
 

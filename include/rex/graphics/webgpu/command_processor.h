@@ -119,20 +119,15 @@ class WebGPUCommandProcessor : public CommandProcessor {
 
   // Device thread only: the swap's gamma ramp pipeline, created on first use.
   bool EnsureSwapPipeline();
-  struct SwapRamps {
+  struct SwapConstants {
     uint32_t table[256];
     uint32_t pwl[128 * 3];
-    uint32_t use_pwl[4];
+    // Whether to use the PWL ramp, and the frontbuffer's host swizzle.
+    uint32_t use_pwl;
+    uint32_t host_swizzle;
+    uint32_t padding[2];
   };
   WGPURenderPipeline swap_pipeline_ = nullptr;
-
-  // The last resolved color area, copied out at resolve time (resolves often
-  // clear the source right after), shown by the swap until resolves write
-  // memory and the swap reads the frontbuffer.
-  WGPUTexture resolved_texture_ = nullptr;
-  WGPUTextureFormat resolved_format_ = WGPUTextureFormat_Undefined;
-  uint32_t resolved_width_ = 0;
-  uint32_t resolved_height_ = 0;
 
   // Bring-up statistics, logged every kStatisticsFrames frames.
   static constexpr uint32_t kStatisticsFrames = 300;

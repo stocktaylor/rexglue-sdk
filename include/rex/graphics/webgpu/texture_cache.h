@@ -55,6 +55,12 @@ class WebGPUTextureCache final : public TextureCache {
                                              xenos::FetchOpDimension dimension, bool is_signed);
   WGPUSampler GetSampler(const WgslShader::SamplerBinding& binding);
 
+  // The frontbuffer to swap: the texture of fetch constant 0 (which VdSwap
+  // sets), loaded, or null. The view is a 2D array; host_swizzle_out maps the
+  // guest components to the host texture's, as views can't swizzle.
+  WGPUTextureView RequestSwapTexture(uint32_t& width_out, uint32_t& height_out,
+                                     xenos::TextureFormat& format_out, uint32_t& host_swizzle_out);
+
  protected:
   bool IsSignedVersionSeparateForFormat(TextureKey key) const override;
   uint32_t GetHostFormatSwizzle(TextureKey key) const override;

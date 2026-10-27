@@ -581,6 +581,27 @@ void WebGPUTextureCache::RequestTextures(uint32_t used_texture_mask) {
   }
 }
 
+WGPUTextureView WebGPUTextureCache::RequestSwapTexture(uint32_t& width_out, uint32_t& height_out,
+                                                       xenos::TextureFormat& format_out,
+                                                       uint32_t& host_swizzle_out) {
+  xenos::xe_gpu_texture_fetch_t fetch = register_file().GetTextureFetch(0);
+  TextureKey key;
+  BindingInfoFromFetchConstant(fetch, key, nullptr);
+  if (!key.is_valid || key.base_page == 0 || key.dimension != xenos::DataDimension::k2DOrStacked) {
+    return nullptr;
+  }
+  auto* texture = static_cast<WebGPUTexture*>(FindOrCreateTexture(key));
+  if (!texture || !LoadTextureData(*texture)) {
+    return nullptr;
+  }
+  texture->MarkAsUsed();
+  width_out = key.GetWidth();
+  height_out = key.GetHeight();
+  format_out = key.format;
+  host_swizzle_out = GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(key));
+  return texture->view();
+}
+
 WGPUTextureView WebGPUTextureCache::GetActiveBindingOrNullView(uint32_t fetch_constant_index,
                                                                xenos::FetchOpDimension dimension,
                                                                bool is_signed) {

@@ -65,6 +65,9 @@ bool WebGPUCommandProcessor::SetupContext() {
     return false;
   }
   render_target_cache_ = std::make_unique<WebGPURenderTargetCache>(*this);
+  if (!render_target_cache_->Initialize()) {
+    return false;
+  }
   texture_cache_ = std::make_unique<WebGPUTextureCache>(*register_file_, *shared_memory_, *this);
   if (!texture_cache_->Initialize()) {
     return false;
@@ -96,23 +99,18 @@ void WebGPUCommandProcessor::ShutdownContext() {
   }
   if (device_thread_) {
     WGPUBindGroup bind_group = shared_memory_bind_group_;
-    WGPUTexture resolved = resolved_texture_;
     WGPURenderPipeline swap_pipeline = swap_pipeline_;
     swap_pipeline_ = nullptr;
-    device_thread_->Post([bind_group, resolved, swap_pipeline] {
+    device_thread_->Post([bind_group, swap_pipeline] {
       if (swap_pipeline) {
         wgpuRenderPipelineRelease(swap_pipeline);
       }
       if (bind_group) {
         wgpuBindGroupRelease(bind_group);
       }
-      if (resolved) {
-        wgpuTextureRelease(resolved);
-      }
     });
   }
   shared_memory_bind_group_ = nullptr;
-  resolved_texture_ = nullptr;
   texture_cache_.reset();
   render_target_cache_.reset();
   pipeline_cache_.reset();
@@ -848,56 +846,15 @@ bool WebGPUCommandProcessor::IssueCopy() {
     color = render_target_cache_->GetColor(color_info.color_base, pitch, color_info.color_format);
   }
 
-  // Copy the area out (the source is often cleared right after).
-  uint32_t width = resolve_info.coordinate_info.width_div_8 * 8;
-  uint32_t height = resolve_info.height_div_8 * 8;
-  if (color && width && height) {
-    const draw_util::ResolveEdramInfo& edram = resolve_info.color_edram_info;
-    uint32_t tile_offset = edram.base_tiles - resolve_info.color_original_base;
-    uint32_t tile_width = xenos::kEdramTileWidthSamples >> uint32_t(edram.format_is_64bpp);
-    uint32_t pitch_tiles = std::max(uint32_t(edram.pitch_tiles), uint32_t(1));
-    uint32_t x = (tile_offset % pitch_tiles) * tile_width +
-                 resolve_info.coordinate_info.edram_offset_x_div_8 * 8;
-    uint32_t y = (tile_offset / pitch_tiles) * xenos::kEdramTileHeightSamples +
-                 resolve_info.coordinate_info.edram_offset_y_div_8 * 8;
-    if (x < color->width && y < color->height) {
-      width = std::min(width, color->width - x);
-      height = std::min(height, color->height - y);
-      if (!resolved_texture_ || resolved_format_ != color->format || resolved_width_ != width ||
-          resolved_height_ != height) {
-        WGPUTexture old_texture = resolved_texture_;
-        if (old_texture) {
-          // Commands recorded earlier in this list may still use it.
-          command_list_->Record(
-              [old_texture](WebGPUCommandList::Encoder&) { wgpuTextureRelease(old_texture); });
-        }
-        device_thread_->Call([&] {
-          WGPUTextureDescriptor desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
-          desc.label = {"Resolved", WGPU_STRLEN};
-          desc.size = {width, height, 1};
-          desc.format = color->format;
-          desc.usage =
-              WGPUTextureUsage_CopyDst | WGPUTextureUsage_CopySrc | WGPUTextureUsage_TextureBinding;
-          resolved_texture_ = wgpuDeviceCreateTexture(device_thread_->device().device(), &desc);
-        });
-        resolved_format_ = color->format;
-        resolved_width_ = width;
-        resolved_height_ = height;
-      }
-      EndRenderPass();
-      WGPUTexture source = color->texture;
-      WGPUTexture destination = resolved_texture_;
-      command_list_->Record([=](WebGPUCommandList::Encoder& encoder) {
-        WGPUTexelCopyTextureInfo source_info = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
-        source_info.texture = source;
-        source_info.origin = {x, y, 0};
-        WGPUTexelCopyTextureInfo destination_info = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
-        destination_info.texture = destination;
-        WGPUExtent3D size = {width, height, 1};
-        wgpuCommandEncoderCopyTextureToTexture(encoder.encoder, &source_info, &destination_info,
-                                               &size);
-      });
-    }
+  // Copy to memory (before the clears, which usually follow on the source).
+  RenderTarget* copy_source = color;
+  if (resolve_info.IsCopyingDepth()) {
+    auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+    copy_source =
+        render_target_cache_->GetDepth(depth_info.depth_base, pitch, depth_info.depth_format);
+  }
+  if (copy_source && resolve_info.coordinate_info.width_div_8 && resolve_info.height_div_8) {
+    render_target_cache_->ResolveCopy(resolve_info, *copy_source, *shared_memory_, *texture_cache_);
   }
 
   // Clears (of the whole surface for now, not just the resolved area).
@@ -933,8 +890,12 @@ bool WebGPUCommandProcessor::IssueCopy() {
 void WebGPUCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
   (void)frontbuffer_ptr;
-  // The resolved texture as of this point is what the refresher copies; a
-  // later resolve can only replace it after the refresher has run.
+  // The frontbuffer, through the texture cache (loading it is recorded in this
+  // submission, before the refresher's commands).
+  uint32_t swap_width = 0, swap_height = 0, swap_swizzle = 0;
+  xenos::TextureFormat swap_format = xenos::TextureFormat::k_8_8_8_8;
+  WGPUTextureView swap_view =
+      texture_cache_->RequestSwapTexture(swap_width, swap_height, swap_format, swap_swizzle);
   Flush();
   // Keep the GPU thread at most two frames ahead of the GPU.
   AwaitSubmissions(2);
@@ -960,22 +921,23 @@ void WebGPUCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   }
   // The display gamma ramp of the guest: the 256-entry table for 8-bit
   // frontbuffers, the piecewise linear one for 10-bit ones.
-  auto ramps = std::make_shared<SwapRamps>();
-  static_assert(sizeof(ramps->table) == sizeof(reg::DC_LUT_30_COLOR) * 256);
-  static_assert(sizeof(ramps->pwl) == sizeof(reg::DC_LUT_PWL_DATA) * 128 * 3);
-  std::memcpy(ramps->table, gamma_ramp_256_entry_table(), sizeof(ramps->table));
-  std::memcpy(ramps->pwl, gamma_ramp_pwl_rgb(), sizeof(ramps->pwl));
-  ramps->use_pwl[0] = resolved_format_ == WGPUTextureFormat_RGB10A2Unorm;
-  WGPUTexture resolved = resolved_texture_;
-  uint32_t copy_width = std::min(resolved_width_, frontbuffer_width);
-  uint32_t copy_height = std::min(resolved_height_, frontbuffer_height);
+  auto constants = std::make_shared<SwapConstants>();
+  static_assert(sizeof(constants->table) == sizeof(reg::DC_LUT_30_COLOR) * 256);
+  static_assert(sizeof(constants->pwl) == sizeof(reg::DC_LUT_PWL_DATA) * 128 * 3);
+  std::memcpy(constants->table, gamma_ramp_256_entry_table(), sizeof(constants->table));
+  std::memcpy(constants->pwl, gamma_ramp_pwl_rgb(), sizeof(constants->pwl));
+  constants->use_pwl = swap_format == xenos::TextureFormat::k_2_10_10_10 ||
+                       swap_format == xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16;
+  constants->host_swizzle = swap_swizzle;
+  uint32_t copy_width = swap_view ? std::min(swap_width, frontbuffer_width) : 0;
+  uint32_t copy_height = swap_view ? std::min(swap_height, frontbuffer_height) : 0;
   presenter->RefreshGuestOutput(
       frontbuffer_width, frontbuffer_height, 1280, 720,
-      [this, resolved, copy_width, copy_height,
-       ramps](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+      [this, swap_view, copy_width, copy_height,
+       constants](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& webgpu_context =
             static_cast<ui::webgpu::WebGPUPresenter::WebGPUGuestOutputRefreshContext&>(context);
-        context.SetIs8bpc(!ramps->use_pwl[0]);
+        context.SetIs8bpc(!constants->use_pwl);
         WGPUDevice device = device_thread_->device().device();
         WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
         WGPURenderPassColorAttachment attachment = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
@@ -987,23 +949,22 @@ void WebGPUCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         pass_desc.colorAttachmentCount = 1;
         pass_desc.colorAttachments = &attachment;
         WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
-        if (resolved && copy_width && copy_height && EnsureSwapPipeline()) {
-          // The resolved area through the gamma ramp into the guest output.
+        if (swap_view && copy_width && copy_height && EnsureSwapPipeline()) {
+          // The frontbuffer through the gamma ramp into the guest output.
           WGPUBufferDescriptor buffer_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
-          buffer_desc.size = sizeof(SwapRamps);
+          buffer_desc.size = sizeof(SwapConstants);
           buffer_desc.usage = WGPUBufferUsage_Uniform;
           buffer_desc.mappedAtCreation = true;
-          WGPUBuffer ramp_buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
-          std::memcpy(wgpuBufferGetMappedRange(ramp_buffer, 0, sizeof(SwapRamps)), ramps.get(),
-                      sizeof(SwapRamps));
-          wgpuBufferUnmap(ramp_buffer);
-          WGPUTextureView source_view = wgpuTextureCreateView(resolved, nullptr);
+          WGPUBuffer constants_buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
+          std::memcpy(wgpuBufferGetMappedRange(constants_buffer, 0, sizeof(SwapConstants)),
+                      constants.get(), sizeof(SwapConstants));
+          wgpuBufferUnmap(constants_buffer);
           WGPUBindGroupEntry entries[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
           entries[0].binding = 0;
-          entries[0].buffer = ramp_buffer;
-          entries[0].size = sizeof(SwapRamps);
+          entries[0].buffer = constants_buffer;
+          entries[0].size = sizeof(SwapConstants);
           entries[1].binding = 1;
-          entries[1].textureView = source_view;
+          entries[1].textureView = swap_view;
           WGPUBindGroupLayout layout = wgpuRenderPipelineGetBindGroupLayout(swap_pipeline_, 0);
           WGPUBindGroupDescriptor group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
           group_desc.layout = layout;
@@ -1016,8 +977,7 @@ void WebGPUCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
           wgpuBindGroupRelease(bind_group);
           wgpuBindGroupLayoutRelease(layout);
-          wgpuTextureViewRelease(source_view);
-          wgpuBufferRelease(ramp_buffer);
+          wgpuBufferRelease(constants_buffer);
         }
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
@@ -1039,10 +999,20 @@ bool WebGPUCommandProcessor::EnsureSwapPipeline() {
 struct Ramps {
   table: array<vec4u, 64>,
   pwl: array<vec4u, 96>,
-  use_pwl: vec4u,
+  // x: whether to use the PWL ramp, y: the frontbuffer's host swizzle.
+  options: vec4u,
 }
 @group(0) @binding(0) var<uniform> ramps: Ramps;
-@group(0) @binding(1) var source: texture_2d<f32>;
+@group(0) @binding(1) var source: texture_2d_array<f32>;
+
+// 3 bits per component: a host component (0-3), or 4 for 0 and 5 for 1.
+fn swizzle(color: vec4f, component: u32) -> f32 {
+  let selector = (ramps.options.y >> (3u * component)) & 7u;
+  if (selector < 4u) {
+    return color[selector];
+  }
+  return select(0.0, 1.0, selector == 5u);
+}
 
 fn table_entry(i: u32) -> u32 { return ramps.table[i >> 2u][i & 3u]; }
 
@@ -1059,12 +1029,13 @@ fn apply_pwl(value_10b: u32, channel: u32) -> f32 {
 }
 
 @fragment fn fs_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
-  let color = textureLoad(source, vec2i(position.xy), 0);
-  if (ramps.use_pwl.x != 0u) {
-    let value = vec3u(color.rgb * 1023.0 + 0.5);
+  let host_color = textureLoad(source, vec2i(position.xy), 0, 0);
+  let color = vec3f(swizzle(host_color, 0u), swizzle(host_color, 1u), swizzle(host_color, 2u));
+  if (ramps.options.x != 0u) {
+    let value = vec3u(color * 1023.0 + 0.5);
     return vec4f(apply_pwl(value.r, 0u), apply_pwl(value.g, 1u), apply_pwl(value.b, 2u), 1.0);
   }
-  let value = vec3u(color.rgb * 255.0 + 0.5);
+  let value = vec3u(color * 255.0 + 0.5);
   // 10-bit blue, green, red in bits 0, 10, 20.
   return vec4f(f32((table_entry(value.r) >> 20u) & 0x3FFu),
                f32((table_entry(value.g) >> 10u) & 0x3FFu),

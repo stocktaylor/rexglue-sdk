@@ -11,23 +11,31 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
 
 #include <webgpu/webgpu.h>
 
+#include <rex/graphics/util/draw.h>
 #include <rex/graphics/xenos.h>
 
 namespace rex::graphics::webgpu {
 
 class WebGPUCommandProcessor;
+class WebGPUSharedMemory;
+class WebGPUTextureCache;
 
 // For bring-up, a far simpler model than RenderTargetCache's EDRAM emulation:
 // one host texture per EDRAM surface (base tile, pitch, format), as tall as
 // the EDRAM allows, never sharing contents with others at overlapping
-// addresses. No MSAA, no format reinterpretation, no resolve to memory yet:
-// the swap shows the last resolved color surface.
+// addresses. No MSAA or format reinterpretation.
+//
+// Resolves work as the Vulkan backend's host render target path: the resolved
+// area of the source render target is dumped into an EDRAM buffer in the
+// guest's layout and encoding (internal WGSL below), from which the shared
+// resolve copy shaders write the destination texture to shared memory.
 class WebGPURenderTargetCache {
  public:
   static constexpr uint32_t kMaxHeight = 2048;
@@ -45,6 +53,8 @@ class WebGPURenderTargetCache {
       : command_processor_(command_processor) {}
   ~WebGPURenderTargetCache();
 
+  bool Initialize();
+
   // The host format for a guest format: 8-bit gamma as 8-bit UNORM (the
   // shader converts), 16-bit fixed and 2:10:10:10 float as 16-bit float.
   static WGPUTextureFormat GetColorFormat(xenos::ColorRenderTargetFormat format);
@@ -55,8 +65,10 @@ class WebGPURenderTargetCache {
   RenderTarget* GetDepth(uint32_t base_tiles, uint32_t pitch,
                          xenos::DepthRenderTargetFormat format);
 
-  void SetLastResolved(RenderTarget* render_target) { last_resolved_ = render_target; }
-  RenderTarget* last_resolved() const { return last_resolved_; }
+  // Records copying the resolve area of `source` (the color render target the
+  // resolve reads) to its destination in shared memory. Clears are separate.
+  void ResolveCopy(const draw_util::ResolveInfo& resolve_info, RenderTarget& source,
+                   WebGPUSharedMemory& shared_memory, WebGPUTextureCache& texture_cache);
 
   void Shutdown();
 
@@ -65,7 +77,15 @@ class WebGPURenderTargetCache {
 
   WebGPUCommandProcessor& command_processor_;
   std::unordered_map<uint64_t, std::unique_ptr<RenderTarget>> render_targets_;
-  RenderTarget* last_resolved_ = nullptr;
+
+  // Device objects, created in Initialize.
+  WGPUBuffer edram_buffer_ = nullptr;
+  WGPUBindGroupLayout dump_layout_ = nullptr;
+  WGPUComputePipeline dump_pipeline_ = nullptr;
+  std::array<WGPUComputePipeline, size_t(draw_util::ResolveCopyShaderIndex::kCount)>
+      copy_pipelines_{};
+  uint32_t min_storage_offset_alignment_ = 256;
+  bool depth_resolve_logged_ = false;
 };
 
 }  // namespace rex::graphics::webgpu

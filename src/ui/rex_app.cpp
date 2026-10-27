@@ -27,6 +27,7 @@
 #include <rex/ui/flags.h>
 #include <rex/kernel/crt/heap.h>
 #include <rex/filesystem.h>
+#include <rex/filesystem/devices/browser_file_device.h>
 #include <rex/logging/sink.h>
 #include <rex/logging.h>
 #include <rex/ui/overlay/achievement_toast.h>
@@ -235,7 +236,9 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
     return false;
   }
-  if (!std::filesystem::is_directory(paths.game_data_root)) {
+  // In the browser the game data may be a picked folder rather than a path.
+  if (!rex::filesystem::BrowserFileDevice::IsAvailable() &&
+      !std::filesystem::is_directory(paths.game_data_root)) {
     auto msg = fmt::format("--game_data_root does not exist: {}", paths.game_data_root.string());
     REXLOG_ERROR("{}", msg);
     rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
@@ -290,25 +293,14 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
   std::string xex_image = "game:\\default.xex";
   OnLoadXexImage(xex_image);
 
-  // Mirrors the game:\ / d:\ -> game_data_root mapping in Runtime::SetupVfs.
-  {
-    constexpr std::string_view kGameDevice = "game:\\";
-    constexpr std::string_view kDDevice = "d:\\";
-    std::string_view tail = xex_image;
-    if (tail.starts_with(kGameDevice)) {
-      tail.remove_prefix(kGameDevice.size());
-    } else if (tail.starts_with(kDDevice)) {
-      tail.remove_prefix(kDDevice.size());
-    }
-    std::string host_tail{tail};
-    std::replace(host_tail.begin(), host_tail.end(), '\\', '/');
-    auto xex_host = paths.game_data_root / host_tail;
-    if (!std::filesystem::is_regular_file(xex_host)) {
-      auto msg = fmt::format("Entrypoint XEX not found: {}", xex_host.string());
-      REXLOG_ERROR("{}", msg);
-      rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
-      return false;
-    }
+  // Through the VFS, which maps game:\ and d:\ to the game data (a folder, or
+  // the files picked in the browser).
+  if (!runtime_->file_system()->ResolvePath(xex_image)) {
+    auto msg = fmt::format("Entrypoint XEX not found: {} (game data: {})", xex_image,
+                           paths.game_data_root.string());
+    REXLOG_ERROR("{}", msg);
+    rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+    return false;
   }
 
   status = runtime_->LoadXexImage(xex_image);

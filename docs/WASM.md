@@ -342,10 +342,11 @@ The largest item. For scale, the Vulkan backend ([src/graphics/vulkan](../src/gr
 
 ## Phase 6: Packaging and hosting
 
-- [ ] An HTML shell page: canvas, loading progress, game data import.
+- [x] An HTML shell page (rextools `rex wasm build --web`): the canvas and a game folder picker. Loading progress is still missing.
 - [ ] Hosting with the COOP/COEP headers that `SharedArrayBuffer` needs; document a local test server setup.
-- [ ] Browser file system: WASMFS with OPFS for game data and saves, plus a first-run import or streaming.
-- [ ] Asset streaming and caching (OPFS, plus service-worker caching for the `.wasm` file).
+- [x] Game data from the user's disk, any size, read in place: the page asks for the game's folder (`<input webkitdirectory>` in every browser; `showDirectoryPicker()` on Chromium, whose handle it keeps in IndexedDB so later visits need one permission click) and finds the folder holding `default.xex` in it. The picked `File` objects are references to the user's disk, nothing is copied or uploaded. [browser_game_files.js](../src/filesystem/devices/browser_game_files.js), a `--pre-js`, holds the program until the pick (a run dependency) and sends the list to every worker, wrapping `Worker` so later ones get it too: game threads read synchronously and never return to their event loop to receive it afterwards. [BrowserFileDevice](../include/rex/filesystem/devices/browser_file_device.h) mounts it as the game data (`game:`, `d:`) and reads slices with `FileReaderSync` on the calling thread. The XEX check at startup now goes through the VFS. Projects that mount the game folder themselves mount a `BrowserFileDevice` when `BrowserFileDevice::IsAvailable()` (Blade's `\Device\Flash`). Tested in headless Firefox with the pick simulated (Files made from Blade's data, handed to the page's handler): Blade runs from them, frame 600 as on Vulkan. `rex wasm build --web --package-data` keeps the packaged `<name>.data` for headless tests.
+- [ ] Saves and settings in the browser: WASMFS or IDBFS with OPFS, so they persist (now the page's in-memory file system).
+- [ ] Caching the `.wasm` file (service worker); London's is 190 MB.
 - [ ] Input through SDL3 (browser Gamepad API, keyboard, mouse with pointer lock) and audio through SDL3's Web Audio backend.
 - [ ] The SDL window from a worker (the main loop runs under `PROXY_TO_PTHREAD`); the software presenter paints through SDL's window framebuffer.
 - [ ] A packaged wasm SDK (install/export rules).

@@ -11,6 +11,7 @@
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
+#include <rex/filesystem/devices/browser_file_device.h>
 #include <rex/filesystem/devices/host_path_device.h>
 #include <rex/filesystem/devices/null_device.h>
 #include <rex/filesystem/vfs.h>
@@ -297,25 +298,30 @@ bool Runtime::SetupVfs() {
     return true;
   }
 
-  auto abs_game_root = std::filesystem::absolute(game_data_root_);
-  if (!std::filesystem::exists(abs_game_root)) {
-    REXSYS_ERROR("Runtime::SetupVfs: game_data_root does not exist: {}", abs_game_root.string());
-    return false;
-  }
-
-  // Mount game_data_root as \Device\Harddisk0\Partition1
+  // Mount the game data as \Device\Harddisk0\Partition1: the folder the user
+  // picked in the browser if there is one, game_data_root otherwise.
   auto mount_path = "\\Device\\Harddisk0\\Partition1";
-  auto device = std::make_unique<rex::filesystem::HostPathDevice>(
-      mount_path, abs_game_root, !REXCVAR_GET(allow_game_relative_writes));
+  std::unique_ptr<rex::filesystem::Device> device;
+  if (rex::filesystem::BrowserFileDevice::IsAvailable()) {
+    device = std::make_unique<rex::filesystem::BrowserFileDevice>(mount_path);
+  } else {
+    auto abs_game_root = std::filesystem::absolute(game_data_root_);
+    if (!std::filesystem::exists(abs_game_root)) {
+      REXSYS_ERROR("Runtime::SetupVfs: game_data_root does not exist: {}", abs_game_root.string());
+      return false;
+    }
+    device = std::make_unique<rex::filesystem::HostPathDevice>(
+        mount_path, abs_game_root, !REXCVAR_GET(allow_game_relative_writes));
+    REXSYS_DEBUG("  Mounting {} at {}", abs_game_root.string(), mount_path);
+  }
   if (!device->Initialize()) {
-    REXSYS_ERROR("Runtime::SetupVfs: Failed to initialize host path device");
+    REXSYS_ERROR("Runtime::SetupVfs: Failed to initialize the game data device");
     return false;
   }
   if (!file_system_->RegisterDevice(std::move(device))) {
-    REXSYS_ERROR("Runtime::SetupVfs: Failed to register host path device");
+    REXSYS_ERROR("Runtime::SetupVfs: Failed to register the game data device");
     return false;
   }
-  REXSYS_DEBUG("  Mounted {} at {}", abs_game_root.string(), mount_path);
 
   // Register symbolic links for game: and D:
   file_system_->RegisterSymbolicLink("game:", mount_path);

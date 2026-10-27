@@ -2,6 +2,7 @@ add_library(rexfilesystem OBJECT
     device.cpp
     entry.cpp
     virtual_file_system.cpp
+    devices/browser_file_device.cpp
     devices/disc_image_device.cpp
     devices/disc_image_entry.cpp
     devices/disc_image_file.cpp
@@ -34,3 +35,9 @@ target_include_directories(rexfilesystem PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_include_directories(rexfilesystem PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/devices)
+
+if(EMSCRIPTEN)
+    # Hands the game folder picked in the page to every worker (BrowserFileDevice).
+    target_link_options(rexfilesystem INTERFACE
+        "--pre-js=${CMAKE_CURRENT_SOURCE_DIR}/devices/browser_game_files.js")
+endif()

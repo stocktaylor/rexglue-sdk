@@ -345,6 +345,23 @@ if(EMSCRIPTEN AND SDL_DUMMYAUDIO)
     endif()
 endif()
 
+# SDL's JavaScript turns memory64 pointers into HEAP32 indices with
+# Number(ptr / 4n), assuming they reach JavaScript as BigInts, but Emscripten
+# passes them to EM_ASM as Numbers ("can't convert BigInt to number", breaking
+# audio output and pointer events). Accept either.
+if(EMSCRIPTEN)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/sdl3/src/SDL.c" _sdl_code)
+    string(FIND "${_sdl_code}" "return Number(ptr / 4n);" _sdl_pos)
+    if(_sdl_pos EQUAL -1)
+        message(WARNING "SDL.c no longer converts pointers with Number(ptr / 4n); "
+                        "revisit its overlay in thirdparty/CMakeLists.txt")
+    else()
+        string(REPLACE "return Number(ptr / 4n);" "return Number(BigInt(ptr) / 4n);"
+            _sdl_code "${_sdl_code}")
+        _rex_sdl_overlay(src/SDL.c _sdl_code)
+    endif()
+endif()
+
 # SDL's Emscripten joystick driver registers its gamepad connection callbacks
 # on the calling thread, but the UI thread that initializes it is a worker,
 # where the callbacks' navigator.getGamepads() doesn't exist. Run them on the

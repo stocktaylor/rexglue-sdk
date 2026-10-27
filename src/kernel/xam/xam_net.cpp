@@ -12,7 +12,10 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 #if REX_PLATFORM_MAC || REX_PLATFORM_WASM
 #include <sys/select.h>
@@ -798,6 +801,31 @@ struct host_set {
 i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
                         ppc_ptr_t<x_fd_set> writefds, ppc_ptr_t<x_fd_set> exceptfds,
                         mapped_void timeout_ptr) {
+#if REX_PLATFORM_WASM
+  // Offline sockets (XSocket), with no native handles: nothing ever arrives and
+  // every socket is writable.
+  (void)caller;
+  (void)nfds;
+  if (readfds) {
+    readfds->fd_count = 0;
+  }
+  if (exceptfds) {
+    exceptfds->fd_count = 0;
+  }
+  int writable = writefds ? int(uint32_t(writefds->fd_count)) : 0;
+  if (!writable) {
+    // Wait as asked, at most a second at a time (no timeout means forever).
+    std::chrono::microseconds wait = std::chrono::seconds(1);
+    if (timeout_ptr) {
+      int32_t timeout[2] = {timeout_ptr.as_array<int32_t>()[0], timeout_ptr.as_array<int32_t>()[1]};
+      chrono::Clock::ScaleGuestDurationTimeval(&timeout[0], &timeout[1]);
+      wait = std::min(wait, std::chrono::microseconds(
+                                std::max<int64_t>(int64_t(timeout[0]) * 1000000 + timeout[1], 0)));
+    }
+    std::this_thread::sleep_for(wait);
+  }
+  return writable;
+#endif
   host_set host_readfds = {};
   fd_set native_readfds = {};
   if (readfds) {

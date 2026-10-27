@@ -21,12 +21,13 @@ Where things stand:
 
 - The SDK (runtime, null GPU plugin, third-party libraries) builds for wasm64, and the smoke test passes under node (checked locally; CI not rechecked).
 - **Blade** (the 1888 dashboard, `../Blade`) builds for wasm64 in about 100 s on a 16-core x86-64 Linux machine (`blade.wasm` is 46 MB) and runs under node with the null GPU: kernel startup, XAM/XConfig/audio setup, then the dashboard at a steady 59 fps with the same 181 draws and 2081 vertices per frame as a native build of the same revision. The null GPU's wireframes match native's (the remaining 0.08% of pixels is animation, as between two native frames), emulating the guest's rounding modes costs about 1% of CPU time, and the write-watch checks on stores about another 2%.
+- **London 2012** (`~/Source/Xenia Recomps/London`, 6 GB of game data) is the second title: it builds for wasm64 (with `-DLONDON_LAUNCHER=OFF`, as its launcher restarts the process with `execv`) and runs under node on the WebGPU backend through Dawn (`rex wasm dawn --gpu_backend=webgpu`) at about 58 fps, its frame 600 identical to a native build's. It needed offline sockets, a NaN-free depth clear value in render passes and the oversized function stopgap. The browser needs its data served differently (phase 6): the page currently preloads the whole game folder.
 - **Burnout Crash** (`../Crash`) compiles except its DLL module's oversized functions (see [Oversized functions](#oversized-functions)); it hasn't linked, so static DLL module registration is still untested.
 - Phase 2's milestone was moved to **node first** (headless, host filesystem) instead of a browser tab: it proves memory, threads and kernel startup without data import, COOP/COEP hosting or a canvas, which move to phase 6.
 
 ### Next steps
 
-1. Oversized functions: build them at `-O0` on wasm (per file, without the PCH), then split them in codegen for good (phase 3). Then finish Crash's build and run it, the first test of static DLL module registration.
+1. Finish Crash's build now that oversized functions build at `-O0`, and run it, the first test of static DLL module registration. Split oversized functions in codegen for good (phase 3) if `-O0` code turns out too slow or Crash's 5.4 MB function exceeds V8's limit.
 2. Audit a heavier title for host-side writes to watched memory (phase 4).
 3. Check CI on this branch. On `4df853d` the wasm64 build passed but the smoke test failed, most likely the `CLOCK_MONOTONIC_RAW` divide-by-zero fixed in `1035cae`.
 4. The lint job fails on 10 files that were unformatted before this branch: `src/graphics/d3d12/pipeline_cache.cpp`, `src/graphics/graphics_system.cpp`, `src/graphics/pipeline/shader/dxbc_translator.cpp`, `src/graphics/pipeline/shader/dxbc_translator_memexport.cpp`, `src/graphics/pipeline/shader/spirv_translator_fetch.cpp`, `src/kernel/xam/xam_content.cpp`, `src/kernel/xam/xam_info.cpp`, `src/system/lzx.cpp`, `src/system/xam/content_manager.cpp`, `src/system/xsocket.cpp`. Running `clang-format -i` (version 20.1.8, `scripts/requirements-dev.txt`) on them fixes it.
@@ -201,6 +202,8 @@ Codegen warns about functions over `max_file_size_bytes` (1 MB of C++). Crash's 
 
 `crash_recomp.207.cpp` (3.4 MB) was still in the mid-level optimizer after more than 2 hours of CPU time. RegStackify runs at every level above `-O0`, so `-O1` is no fix. At `-O3` the wasm code is about 1.2 times the C++ size, which puts the 5.4 MB function near V8's 7.65 MB limit on a function body. The `-O0` output is smaller, likely because the per-access MMIO check isn't inlined. A per-file `-O0` on wasm needs those files built without the precompiled header, which is built at `-O3` and which Clang refuses to mix with another level (it finds `<header>.pch` even through a plain `-include`).
 
+The stopgap is in place: codegen lists the recompiled files holding a function over `max_file_size_bytes` as `GENERATED_OVERSIZED_SOURCES` in `sources.cmake`, and on Emscripten `rexglue_configure_target` ([rexglue_helpers.cmake](../cmake/rexglue_helpers.cmake)) builds them at `-O0` without the precompiled header (they include the project header through their `_funcs` header). London (the 2012 Olympics game, 43,429 functions, seven files with functions of 1.1 to 1.2 MB) builds for wasm64 this way in about 6 minutes; its module is 190 MB. Projects pick the list up when codegen next runs (`rex wasm build --force-codegen`).
+
 ### Build specifics
 
 - `wasm64` preset flags (every object must agree): `-sMEMORY64 -pthread -msimd128 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm`. They're in `CMAKE_<LANG>_FLAGS` because compiler detection already needs `-sMEMORY64`; CMakeLists.txt checks for them.
@@ -255,7 +258,7 @@ Codegen warns about functions over `max_file_size_bytes` (1 MB of C++). Crash's 
 
 - [x] Clock and timers.
 - [x] File system under node: `NODERAWFS` reads the host filesystem directly. The browser (WASMFS with OPFS, data import) is phase 6.
-- [ ] Sockets ([socket_posix.cpp](../src/core/socket_posix.cpp)): compile against Emscripten's emulation; untested. Stub or proxy over WebSocket/WebRTC later.
+- [x] Sockets, offline for now: Emscripten's socket emulation needs a WebSocket server even to bind (under node it `require`s `ws`; browsers can't listen), so on wasm `XSocket` ([xsocket.cpp](../src/system/xsocket.cpp)) uses no host sockets. Creating, binding, listening and options succeed, sends are dropped, receives and accepts would block, connects fail, and `select` reports every socket writable and none readable. That's a console on a disconnected network: London, which quits if socket creation fails, runs on. A real network (WebSocket or WebRTC proxy) comes later.
 - [x] Dynamic libraries: nothing calls `dlopen` once plugins and modules are static.
 - [x] Floating point: FPSCR emulated; rounding modes honored in software (see [Floating point](#floating-point)), flush-to-zero not.
 - [ ] Debug and crash tooling (`dbg_posix.cpp`, `rex crash`, core dumps) has no wasm equivalent; disable it.
@@ -274,7 +277,7 @@ Codegen warns about functions over `max_file_size_bytes` (1 MB of C++). Crash's 
 - [x] Memory macros in [pch_h.inja](../resources/templates/codegen/pch_h.inja) for the software alias translation.
 - [x] SIMD: [intrinsics.h](../include/rex/ppc/intrinsics.h) goes through simde, which maps SSE4.1 to wasm SIMD128 with `-msimd128`. Of the AVX/AVX2 operations Blade uses, `permute_ps` is a single wasm shuffle; the variable shifts (`sllv_epi32` and the SDK's 8- and 16-bit helpers built on it) are a 4-lane loop, as natively on x86-64-v2, since wasm SIMD128 has no per-lane variable shift.
 - [x] Floating point bit-identical to native (see [Floating point](#floating-point)).
-- [ ] Oversized functions (see [Oversized functions](#oversized-functions)): build them at `-O0` on wasm as a stopgap, then split them in codegen, which also keeps them under V8's function body limit. Check locals per function and total functions too.
+- [x] Oversized functions (see [Oversized functions](#oversized-functions)): built at `-O0` on wasm as a stopgap (codegen lists them). Splitting them in codegen, which would also keep them under V8's function body limit, remains open.
 - [x] Browser limits on Blade: largest function body 601 KB (V8's limit is 7.65 MB), at most 112 locals in a function (50,000), 22,119 functions (1,000,000).
 - [ ] Measure module size, compile time and browser compile time on a large title (native executables are 35 MB+). Blade: 46 MB `.wasm`, about 100 s for a full build on 16 cores; V8 compiles it in 0.36 s with Liftoff (11.5 s with TurboFan on all cores, 55 s on one), lazily per function by default. Crash: blocked on oversized functions.
 

@@ -18,6 +18,7 @@
 #include <rex/platform.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xsocket.h>
+#include <rex/system/xthread.h>
 // #include <rex/system/xnet.h>
 
 #include <rex/net/socket.h>
@@ -40,6 +41,18 @@ REXCVAR_DEFINE_INT32(net_privileged_port_offset, 10000, "Net",
 
 namespace rex::system {
 
+namespace {
+
+// WebAssembly has no host sockets yet (Emscripten's emulation needs a
+// WebSocket server even to bind), so sockets there are offline, like a console
+// on a disconnected network: creating, binding, listening and options succeed,
+// sends are dropped, nothing ever arrives (receives would block, accepts find
+// no connection, select reports sockets writable only) and connects fail.
+constexpr bool kOffline = REX_PLATFORM_WASM;
+constexpr uint32_t kWsaEWouldBlock = 10035;
+
+}  // namespace
+
 XSocket::XSocket(KernelState* kernel_state) : XObject(kernel_state, kObjectType) {}
 
 XSocket::XSocket(KernelState* kernel_state, uint64_t native_handle)
@@ -59,6 +72,15 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
     proto = Protocol::X_IPPROTO_UDP;
   }
 
+  if (kOffline) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      REXSYS_INFO("XSocket: no network on WebAssembly, sockets are offline");
+    }
+    return X_STATUS_SUCCESS;
+  }
+
   native_handle_ = socket(af, type, proto);
   if (native_handle_ == -1) {
     return X_STATUS_UNSUCCESSFUL;
@@ -68,6 +90,9 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 }
 
 X_STATUS XSocket::Close() {
+  if (kOffline) {
+    return X_STATUS_SUCCESS;
+  }
   int ret = rex::net::socket_close(native_handle_);
   if (ret != 0) {
     return X_STATUS_UNSUCCESSFUL;
@@ -83,7 +108,7 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
     return X_STATUS_SUCCESS;
   }
 
-  int ret = setsockopt(native_handle_, level, optname, (char*)optval_ptr, optlen);
+  int ret = kOffline ? 0 : setsockopt(native_handle_, level, optname, (char*)optval_ptr, optlen);
   if (ret < 0) {
     // TODO: WSAGetLastError()
     return X_STATUS_UNSUCCESSFUL;
@@ -98,6 +123,9 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
 }
 
 X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
+  if (kOffline) {
+    return X_STATUS_SUCCESS;
+  }
   int ret = rex::net::socket_ioctl(native_handle_, cmd, arg_ptr);
   if (ret < 0) {
     // TODO: Get last error
@@ -108,6 +136,9 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
 }
 
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
+  if (kOffline) {
+    return X_STATUS_UNSUCCESSFUL;
+  }
   int ret = connect(native_handle_, (sockaddr*)name, name_len);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
@@ -117,7 +148,7 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
 }
 
 X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
-  int ret = bind(native_handle_, (sockaddr*)name, name_len);
+  int ret = kOffline ? 0 : bind(native_handle_, (sockaddr*)name, name_len);
 #if !REX_PLATFORM_WIN32
   // Ports below 1024 need root on POSIX, but titles bind system-link/VDP
   // ports like 1000 freely (London 2012 fails init without it). Bind the host
@@ -130,8 +161,7 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
     remapped.sin_port = static_cast<uint16_t>(port + offset);
     ret = bind(native_handle_, (sockaddr*)&remapped, name_len);
     if (ret == 0) {
-      REXSYS_WARN("XSocket::Bind: privileged port {} bound on host port {}", port,
-                  port + offset);
+      REXSYS_WARN("XSocket::Bind: privileged port {} bound on host port {}", port, port + offset);
     }
   }
 #endif
@@ -146,6 +176,9 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
 }
 
 X_STATUS XSocket::Listen(int backlog) {
+  if (kOffline) {
+    return X_STATUS_SUCCESS;
+  }
   int ret = listen(native_handle_, backlog);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
@@ -157,7 +190,12 @@ X_STATUS XSocket::Listen(int backlog) {
 object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
   sockaddr n_sockaddr;
   socklen_t n_name_len = sizeof(sockaddr);
-  uintptr_t ret = accept(native_handle_, &n_sockaddr, &n_name_len);
+  uintptr_t ret = uintptr_t(-1);
+  if (kOffline) {
+    XThread::SetLastError(kWsaEWouldBlock);
+  } else {
+    ret = accept(native_handle_, &n_sockaddr, &n_name_len);
+  }
   if (ret == -1) {
     std::memset(name, 0, *name_len);
     *name_len = 0;
@@ -178,10 +216,17 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
 }
 
 int XSocket::Shutdown(int how) {
+  if (kOffline) {
+    return 0;
+  }
   return shutdown(native_handle_, how);
 }
 
 int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
+  if (kOffline) {
+    XThread::SetLastError(kWsaEWouldBlock);
+    return -1;
+  }
   return recv(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags);
 }
 
@@ -210,6 +255,11 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
   }
   */
 
+  if (kOffline) {
+    XThread::SetLastError(kWsaEWouldBlock);
+    return -1;
+  }
+
   sockaddr_in nfrom;
   socklen_t nfromlen = sizeof(sockaddr_in);
   int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
@@ -229,6 +279,9 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
 }
 
 int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
+  if (kOffline) {
+    return int(buf_len);
+  }
   return send(native_handle_, reinterpret_cast<const char*>(buf), buf_len, flags);
 }
 
@@ -244,6 +297,10 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
     xnet->SendPacket(this, to, buf, buf_len);
   }
   */
+
+  if (kOffline) {
+    return int(buf_len);
+  }
 
   sockaddr_in nto;
   if (to) {

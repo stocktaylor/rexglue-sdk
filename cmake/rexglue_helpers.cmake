@@ -116,6 +116,18 @@ function(rexglue_configure_target target_name)
             # Headless under node with the host filesystem (docs/WASM.md, phase 2).
             target_link_options(${target_name} PRIVATE -sENVIRONMENT=node -sNODERAWFS)
         endif()
+        # Recompiled files holding a function over max_file_size_bytes (listed
+        # by codegen in sources.cmake) build at -O0: above it, the wasm backend
+        # and the optimizer take hours on them (docs/WASM.md, "Oversized
+        # functions"). Without the precompiled header, built at the target's
+        # level, which Clang won't mix with another; they include the project
+        # header through their _funcs header anyway.
+        if(GENERATED_OVERSIZED_SOURCES)
+            set_source_files_properties(${GENERATED_OVERSIZED_SOURCES} PROPERTIES
+                SKIP_PRECOMPILE_HEADERS ON)
+            set_property(SOURCE ${GENERATED_OVERSIZED_SOURCES} APPEND PROPERTY
+                COMPILE_OPTIONS -O0)
+        endif()
     endif()
 
     if(WIN32)

@@ -310,9 +310,16 @@ bool CodegenWriter::write(bool force) {
   REXCODEGEN_TRACE("Recompile: generating sources.cmake");
   {
     auto& recompFiles = tmplData["recomp_files"];
+    auto& oversizedFiles = tmplData["oversized_files"];
     recompFiles = nlohmann::json::array();
+    oversizedFiles = nlohmann::json::array();
     for (size_t i = 0; i < buckets.size(); ++i) {
-      recompFiles.push_back(fmt::format("{}_recomp.{}.cpp", projectName, i));
+      std::string file = fmt::format("{}_recomp.{}.cpp", projectName, i);
+      if (std::any_of(buckets[i].begin(), buckets[i].end(),
+                      [&](size_t entry) { return bodies[entry].size() > maxFileBytes; })) {
+        oversizedFiles.push_back(file);
+      }
+      recompFiles.push_back(std::move(file));
     }
     out = renderWithJson(registry, "codegen/sources_cmake", tmplData);
     SaveCurrentOutData("sources.cmake");

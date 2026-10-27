@@ -182,6 +182,9 @@ void WebGPUCommandProcessor::BeginRenderPass(RenderTarget* const* colors, Render
         WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
     depth_attachment.view = depth_view;
     depth_attachment.depthLoadOp = WGPULoadOp_Load;
+    // Unused when loading, but the default (WGPU_DEPTH_CLEAR_VALUE_UNDEFINED)
+    // is NaN, which the JavaScript API rejects even then.
+    depth_attachment.depthClearValue = 0.0f;
     depth_attachment.depthStoreOp = WGPUStoreOp_Store;
     depth_attachment.stencilLoadOp = WGPULoadOp_Load;
     depth_attachment.stencilStoreOp = WGPUStoreOp_Store;

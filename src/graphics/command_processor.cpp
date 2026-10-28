@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
@@ -109,6 +110,20 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
   }
   return ReadbackResolveMode::kDisabled;
 }
+
+// Registers named in register_table.inc, for WriteRegister's unknown-register
+// log. RegisterFile::GetRegisterInfo is a ~3400-case switch, and calling it on
+// every register write was ~14% of the GPU command thread in GTA IV.
+constexpr auto kKnownRegisters = [] {
+  std::array<uint64_t, (RegisterFile::kRegisterCount + 63) / 64> bits{};
+#define XE_GPU_REGISTER(index, type, name)                  \
+  if ((index) < RegisterFile::kRegisterCount) {             \
+    bits[(index) >> 6] |= UINT64_C(1) << ((index) & 63);    \
+  }
+#include <rex/graphics/register_table.inc>
+#undef XE_GPU_REGISTER
+  return bits;
+}();
 
 }  // namespace
 
@@ -366,7 +381,7 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 
   // Volatile for the WAIT_REG_MEM loop.
   const_cast<volatile uint32_t&>(regs.values[index]) = value;
-  if (!regs.GetRegisterInfo(index)) {
+  if (!(kKnownRegisters[index >> 6] & (UINT64_C(1) << (index & 63)))) {
     REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
   }
 
@@ -713,10 +728,15 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
 
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
-  for (uint32_t m = 0; m < count; m++) {
-    uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
-    uint32_t target_index = write_one_reg ? base_index : base_index + m;
-    WriteRegister(target_index, reg_data);
+  if (write_one_reg) {
+    for (uint32_t m = 0; m < count; m++) {
+      WriteRegister(base_index, reader->ReadAndSwap<uint32_t>());
+    }
+  } else {
+    // Sequential registers: one range write, so backends can copy shader
+    // constants in bulk and invalidate once (as SET_CONSTANT already does)
+    // instead of once per register.
+    WriteRegisterRangeFromRing(reader, base_index, count);
   }
 
   return true;

@@ -9,8 +9,10 @@
  * @modified    Tom Clay & Rien Gupta, 2026 - Adapted for ReXGlue runtime (POSIX + macOS)
  */
 
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -25,6 +27,7 @@
 #include <mach/vm_region.h>
 #endif  // REX_PLATFORM_MAC
 
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -170,9 +173,69 @@ static bool ParseProcMapsLine(const std::string& line, LinuxMapEntry& out) {
   return out.start < out.end;
 }
 
+// PROCMAP_QUERY (Linux 6.11+): look up one address in the kernel's VMA tree
+// through an ioctl on /proc/self/maps, instead of reading and parsing the whole
+// text file. Defined here because older SDK headers (Steam Runtime) lack it.
+struct ProcmapQuery {
+  uint64_t size;
+  uint64_t query_flags;
+  uint64_t query_addr;
+  uint64_t vma_start;
+  uint64_t vma_end;
+  uint64_t vma_flags;
+  uint64_t vma_page_size;
+  uint64_t vma_offset;
+  uint64_t inode;
+  uint32_t dev_major;
+  uint32_t dev_minor;
+  uint32_t vma_name_size;
+  uint32_t build_id_size;
+  uint64_t vma_name_addr;
+  uint64_t build_id_addr;
+};
+constexpr unsigned long kProcmapQuery = _IOWR('f', 17, ProcmapQuery);
+constexpr uint64_t kProcmapVmaReadable = 0x01;
+constexpr uint64_t kProcmapVmaWritable = 0x02;
+constexpr uint64_t kProcmapVmaExecutable = 0x04;
+constexpr uint64_t kProcmapVmaShared = 0x08;
+
+// 1 found, 0 not mapped, -1 PROCMAP_QUERY unavailable (use the text file).
+// The write-watch fault handler queries the faulting page under the global
+// lock; parsing the text file there (thousands of lines once per-page
+// protection has split the mappings) held up the GPU thread on every fault.
+static int QueryEntryForAddress(uintptr_t addr, LinuxMapEntry& out_entry) {
+  static const int maps_fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+  static std::atomic<bool> unsupported{maps_fd < 0};
+  if (unsupported.load(std::memory_order_relaxed)) {
+    return -1;
+  }
+  ProcmapQuery query = {};
+  query.size = sizeof(query);
+  query.query_addr = addr;
+  if (ioctl(maps_fd, kProcmapQuery, &query) != 0) {
+    if (errno == ENOENT) {
+      return 0;
+    }
+    unsupported.store(true, std::memory_order_relaxed);
+    return -1;
+  }
+  out_entry = LinuxMapEntry{};
+  out_entry.start = static_cast<uintptr_t>(query.vma_start);
+  out_entry.end = static_cast<uintptr_t>(query.vma_end);
+  out_entry.perms[0] = (query.vma_flags & kProcmapVmaReadable) ? 'r' : '-';
+  out_entry.perms[1] = (query.vma_flags & kProcmapVmaWritable) ? 'w' : '-';
+  out_entry.perms[2] = (query.vma_flags & kProcmapVmaExecutable) ? 'x' : '-';
+  out_entry.perms[3] = (query.vma_flags & kProcmapVmaShared) ? 's' : 'p';
+  return 1;
+}
+
 // Find the mapping entry in /proc/self/maps that contains the given address
 static bool FindEntryForAddress(void* address, LinuxMapEntry& out_entry) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
+  int queried = QueryEntryForAddress(addr, out_entry);
+  if (queried >= 0) {
+    return queried == 1;
+  }
   std::ifstream maps("/proc/self/maps");
   if (!maps.is_open())
     return false;

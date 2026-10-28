@@ -115,6 +115,10 @@ function(rexglue_configure_target target_name)
         if(REXGLUE_WASM_NODE)
             # Headless under node with the host filesystem (docs/WASM.md, phase 2).
             target_link_options(${target_name} PRIVATE -sENVIRONMENT=node -sNODERAWFS)
+        else()
+            # In the browser, user data persists in IndexedDB (IDBFS).
+            target_link_options(${target_name} PRIVATE -lidbfs.js
+                "--pre-js=${REXGLUE_SHARE_DIR}/browser_user_data.js")
         endif()
         # Recompiled files holding a function over max_file_size_bytes (listed
         # by codegen in sources.cmake) build at -O0: above it, the wasm backend

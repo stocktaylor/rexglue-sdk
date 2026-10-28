@@ -73,8 +73,10 @@ namespace filesystem {
 
 #if defined(__EMSCRIPTEN__)
 // The program's .js file: under node a host path (NODERAWFS), so the config
-// and logs sit next to it as natively; in the browser, its name at the root of
-// the page's file system. Writes at most size bytes, returns the length.
+// and logs sit next to it as natively; in the browser, its name in the home
+// folder, which persists (browser_user_data.js), so they and the settings
+// apps keep next to the config do too. Writes at most size bytes, returns the
+// length.
 // clang-format off
 EM_JS(int, rex_get_script_path, (char* buffer, int size), {
   var path;
@@ -85,7 +87,7 @@ EM_JS(int, rex_get_script_path, (char* buffer, int size), {
     }
   } else {
     var name = typeof location === 'object' ? location.pathname.split('/').pop() : '';
-    path = '/' + (name || 'this.program');
+    path = '/home/web_user/' + (name || 'this.program');
   }
   // Under memory64, EM_JS pointers arrive as BigInts.
   return stringToUTF8(path, Number(buffer), size);

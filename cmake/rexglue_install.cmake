@@ -130,6 +130,7 @@ endif()
 install(FILES
     src/ui/windowed_app_main_sdl.cpp
     src/ui/rex_app.cpp
+    src/ui/browser_user_data.js
     DESTINATION ${CMAKE_INSTALL_DATADIR}/rexglue
 )
 

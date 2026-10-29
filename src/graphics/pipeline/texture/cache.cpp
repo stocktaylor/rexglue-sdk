@@ -444,7 +444,14 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
   // resolves as well to detect when the CPU wants to reuse the memory for a
   // regular texture or a vertex buffer, and thus the scaled resolve version is
   // not up to date anymore.
-  texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
+  if (!texture.MakeUpToDateAndWatch(global_critical_region_.Acquire())) {
+    // The CPU wrote to the texture's memory while it was loading (e.g. a game
+    // adding glyphs to a font atlas), and no watch existed yet to see it. Use
+    // what was loaded for now, and recheck the bindings on the next draw so it
+    // gets reloaded rather than staying stale until the next write.
+    texture_became_outdated_.store(true, std::memory_order_release);
+    return true;
+  }
   texture.LogAction("Loaded");
 
   return true;
@@ -686,9 +693,21 @@ TextureCache::Texture::~Texture() {
   texture_cache_.UpdateTexturesTotalHostMemoryUsage(0, host_memory_usage_);
 }
 
-void TextureCache::Texture::MakeUpToDateAndWatch(
+bool TextureCache::Texture::MakeUpToDateAndWatch(
     const std::unique_lock<std::recursive_mutex>& global_lock) {
   SharedMemory& shared_memory = texture_cache().shared_memory();
+  // A CPU write between RequestRanges and here invalidated the pages without
+  // reaching this texture (its watch isn't registered yet).
+  if (base_outdated_ && !shared_memory.IsRangeValid(
+                            key().base_page << 12,
+                            static_cast<uint32_t>(rex::align(GetGuestBaseSize(), UINT32_C(16))))) {
+    return false;
+  }
+  if (mips_outdated_ && !shared_memory.IsRangeValid(
+                            key().mip_page << 12,
+                            static_cast<uint32_t>(rex::align(GetGuestMipsSize(), UINT32_C(16))))) {
+    return false;
+  }
   if (base_outdated_) {
     assert_not_zero(GetGuestBaseSize());
     base_outdated_ = false;
@@ -703,6 +722,7 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
         key().mip_page << 12, GetGuestMipsSize(), TextureCache::WatchCallback, this, nullptr, 1);
     outdated_mask_.fetch_and(~kOutdatedBitMips, std::memory_order_release);
   }
+  return true;
 }
 
 void TextureCache::Texture::MarkAsUsed() {

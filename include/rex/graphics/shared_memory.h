@@ -78,6 +78,9 @@ class SharedMemory {
   // the range has been fully updated and is usable.
   bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
   bool RequestRange(uint32_t start, uint32_t length);
+  // Whether every page of the range is still valid (not invalidated by a CPU
+  // write since it was uploaded). Call with the global critical region held.
+  bool IsRangeValid(uint32_t start, uint32_t length) const;
 
   // Marks the range and, if not exact_range, potentially its surroundings
   // (to up to the first GPU-written page, as an access violation exception
